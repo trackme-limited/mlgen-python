@@ -1,0 +1,11 @@
+# index target
+export target_idx="mlgen"
+
+# HEC token
+export token="xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
+
+# HEC target
+export target_hec="myhec.mydomain.com:8088"
+
+# change this value to generate a new entity
+export ref="sample001"

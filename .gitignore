@@ -1,0 +1,6 @@
+archives
+.vscode
+run_trackme.sh
+# Mac OS X cached files
+.DS_Store
+config

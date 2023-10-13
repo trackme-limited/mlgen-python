@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  python-service:
+    image: python:3
+    volumes:
+      - ./config:/config
+      - ./run_backfill.sh:/run_backfill.sh
+      - ./run_normal.sh:/run_normal.sh
+      - ./run_gen_lower_outlier.sh:/run_gen_lower_outlier.sh
+      - ./run_gen_lower_outlier.sh:/run_gen_lower_outlier.sh
+    #command: bash /run_normal.sh
+    command: tail -f /dev/null
+    build:
+      context: .
+      dockerfile: Dockerfile
