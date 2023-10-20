@@ -143,6 +143,7 @@ def send_batch_to_hec(events, target, token, index, sourcetype):
                     "index": index,
                     "sourcetype": sourcetype,
                     "source": "ml_gen.py",
+                    "time": event.get("time"),
                 }
             )
             for event in events
