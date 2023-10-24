@@ -8,7 +8,8 @@ services:
       - ./run_backfill.sh:/run_backfill.sh
       - ./run_normal.sh:/run_normal.sh
       - ./run_gen_lower_outlier.sh:/run_gen_lower_outlier.sh
-      - ./run_gen_lower_outlier.sh:/run_gen_lower_outlier.sh
+      - ./run_gen_upper_outlier.sh:/run_gen_upper_outlier.sh
+      - ./ml_gen.py:/ml_gen.py
     #command: bash /run_normal.sh
     command: tail -f /dev/null
     build:
