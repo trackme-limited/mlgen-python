@@ -11,9 +11,22 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+__author__ = "TrackMe Limited"
+__copyright__ = "Copyright 2021, TrackMe Limited, U.K."
+__credits__ = ["Guilhem Marchand"]
+__license__ = "TrackMe Limited, all rights reserved"
+__version__ = "0.1.1"
+__maintainer__ = "TrackMe Limited, U.K."
+__email__ = "support@trackme-solutions.com"
+__status__ = "PRODUCTION"
+
 MAX_BATCH_SIZE = 1000  # Maximum events in a single batch
 event_queue = []  # A queue to hold the events
 LAST_BATCH_SENT = datetime.now()
+
+# Constants for retry logic
+MAX_RETRIES = 60  # With a sleep of 15 seconds, this will give us 15 minutes
+RETRY_SLEEP_DURATION = 15  # 15 seconds
 
 
 def hourly_multiplier(hour, weekday, mode="curve"):
@@ -149,7 +162,24 @@ def send_batch_to_hec(events, target, token, index, sourcetype):
             for event in events
         ]
     )
-    requests.post(url, headers=headers, data=data, verify=False)
+
+    # Retry logic
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            response = requests.post(url, headers=headers, data=data, verify=False)
+            response.raise_for_status()  # Raise an error for bad responses
+            break  # If successful, break out of the loop
+        except requests.RequestException as e:
+            retries += 1
+            if retries == MAX_RETRIES:  # If all retries are exhausted, raise the error
+                print(f"Failed to send data to HEC after {MAX_RETRIES} retries.")
+                raise e
+            else:
+                print(
+                    f"Failed to send data to HEC. Retrying in {RETRY_SLEEP_DURATION} seconds... (Attempt {retries}/{MAX_RETRIES})"
+                )
+                time.sleep(RETRY_SLEEP_DURATION)
 
 
 def backfill_metrics(variation_pct, ref_sample, days, target, token, index, sourcetype):
