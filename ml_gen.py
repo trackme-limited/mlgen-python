@@ -192,12 +192,8 @@ def backfill_metrics(
         else:
             metric = generate_metric_for_time(current_time, 0, ref_sample, mode="curve")
 
-        # Update the timestamp in the metric to reflect the current_time
         metric["time"] = int(current_time.timestamp())
-
-        add_event_to_queue(metric, target, token, index, sourcetype)
-
-        # Increment current_time by sparse_time seconds for the next metric
+        add_event_to_queue(metric, target, token, index, sourcetype, force_send=True)
         current_time += timedelta(seconds=sparse_time)
 
 
