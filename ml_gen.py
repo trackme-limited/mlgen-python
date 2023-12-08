@@ -207,7 +207,7 @@ def main():
         "--mode",
         type=str,
         default="curve",
-        choices=["curve", "stdev"],
+        choices=["curve", "stdev", "sparse"],
         help="Mode to determine hourly multipliers. Choices are 'curve' and 'stdev'. Default is 'curve'.",
     )
     parser.add_argument(
