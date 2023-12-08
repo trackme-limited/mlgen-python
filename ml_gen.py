@@ -191,9 +191,7 @@ def backfill_metrics(
     current_time = past
     while current_time <= now:
         if mode == "sparse":
-            metric = generate_sparse_metric(
-                current_time, ref_sample, sparse_time, args.mode
-            )
+            metric = generate_sparse_metric(current_time, ref_sample, sparse_time, mode)
         else:
             metric = generate_metric_for_time(current_time, 0, ref_sample, mode="curve")
 
