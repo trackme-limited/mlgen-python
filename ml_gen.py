@@ -179,15 +179,24 @@ def send_batch_to_hec(events, target, token, index, sourcetype):
     requests.post(url, headers=headers, data=data, verify=False)
 
 
-def backfill_metrics(variation_pct, ref_sample, days, target, token, index, sourcetype):
+def backfill_metrics(
+    variation_pct, ref_sample, days, target, token, index, sourcetype, mode, sparse_time
+):
     now = datetime.now()
     past = now - timedelta(days=days)
-    delta = timedelta(minutes=1)  # Adjusted to 1 minute interval for backfill
+    delta = timedelta(
+        seconds=sparse_time
+    )  # Adjust interval for backfill to sparse_time
 
     current_time = past
     while current_time <= now:
-        # Pass 0 for variation_pct so that backfill metrics are not influenced by the variation
-        metric = generate_metric_for_time(current_time, 0, ref_sample, mode="curve")
+        if mode == "sparse":
+            metric = generate_sparse_metric(
+                current_time, ref_sample, sparse_time, args.mode
+            )
+        else:
+            metric = generate_metric_for_time(current_time, 0, ref_sample, mode="curve")
+
         add_event_to_queue(metric, target, token, index, sourcetype)
         current_time += delta
 
@@ -278,6 +287,8 @@ def main():
             args.token,
             args.index,
             args.sourcetype,
+            args.mode,
+            args.sparse_time,
         )
 
     interval = 60  # Default interval for regular modes
