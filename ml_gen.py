@@ -16,6 +16,33 @@ event_queue = []  # A queue to hold the events
 LAST_BATCH_SENT = datetime.now()
 
 
+def generate_sparse_metric(dt, ref_sample, sparse_interval, mode):
+    # Adjust the logic to generate a single sparse data point
+    # The main difference will be the generation interval, which is sparse_interval
+    # For simplicity, we will use the logic from generate_metric_for_time with some modifications
+
+    weekday = dt.strftime("%A")
+    hour = dt.hour
+
+    # Use the same logic for getting ranges and applying multipliers
+    # However, ensure that the data point is sparse by considering the sparse interval
+    multiplier = hourly_multiplier(hour, weekday, mode=mode)
+    original_ranges = get_day_ranges(weekday)
+
+    dcount_lower, dcount_upper = original_ranges["dcount_hosts"]
+    events_lower, events_upper = original_ranges["events_count"]
+
+    dcount = random.randint(dcount_lower, dcount_upper) * multiplier
+    events = random.randint(events_lower, events_upper) * multiplier
+
+    return {
+        "time": int(dt.timestamp()),
+        "dcount_hosts": int(dcount),
+        "events_count": int(events),
+        "ref_sample": ref_sample,
+    }
+
+
 def hourly_multiplier(hour, weekday, mode="curve"):
     """
     Given an hour (0 to 23) and a mode, this function returns a multiplier.
@@ -234,6 +261,12 @@ def main():
         default="",
         help="The authentication token for Splunk HEC. No default value.",
     )
+    parser.add_argument(
+        "--sparse_time",
+        type=int,
+        default=14400,  # 4 hours
+        help="Time interval in seconds between two measurements in sparse mode. Default is 14400 seconds (4 hours).",
+    )
     args = parser.parse_args()
 
     if args.backfill == "true":
@@ -247,11 +280,22 @@ def main():
             args.sourcetype,
         )
 
+    interval = 60  # Default interval for regular modes
+    if args.mode == "sparse":
+        interval = args.sparse_time  # Use sparse interval for sparse mode
+
     while True:
         now = datetime.now()
-        metric = generate_metric_for_time(
-            now, args.variation_pct, args.ref_sample, args.mode
-        )
+
+        if args.mode == "sparse":
+            metric = generate_sparse_metric(
+                now, args.ref_sample, args.sparse_time, args.mode
+            )
+        else:
+            metric = generate_metric_for_time(
+                now, args.variation_pct, args.ref_sample, args.mode
+            )
+
         if args.write_local == "true":
             with open("ml_event_sampler.log", "a") as log_file:
                 log_file.write(json.dumps(metric) + "\n")
@@ -259,7 +303,7 @@ def main():
             add_event_to_queue(
                 metric, args.target, args.token, args.index, args.sourcetype
             )
-        time.sleep(60)  # sleep for 1 minute
+        time.sleep(interval)
 
 
 if __name__ == "__main__":
