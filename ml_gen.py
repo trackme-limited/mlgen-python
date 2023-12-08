@@ -146,16 +146,19 @@ def generate_metric_for_time(dt, variation_pct, ref_sample, mode):
     }
 
 
-def add_event_to_queue(metric, target, token, index, sourcetype):
+def add_event_to_queue(metric, target, token, index, sourcetype, force_send=False):
     global event_queue
     global LAST_BATCH_SENT
     event_queue.append(metric)
+
+    # Always send the batch in backfill mode
     if (
-        len(event_queue) >= MAX_BATCH_SIZE
+        force_send
+        or len(event_queue) >= MAX_BATCH_SIZE
         or (datetime.now() - LAST_BATCH_SENT).seconds >= 120
     ):
         send_batch_to_hec(event_queue, target, token, index, sourcetype)
-        event_queue = []  # Clear the queue after sending
+        event_queue = []
         LAST_BATCH_SENT = datetime.now()
 
 
