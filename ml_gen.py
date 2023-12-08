@@ -151,12 +151,12 @@ def add_event_to_queue(metric, target, token, index, sourcetype, force_send=Fals
     global LAST_BATCH_SENT
     event_queue.append(metric)
 
-    # Always send the batch in backfill mode
     if (
         force_send
         or len(event_queue) >= MAX_BATCH_SIZE
         or (datetime.now() - LAST_BATCH_SENT).seconds >= 120
     ):
+        print(f"Sending batch of {len(event_queue)} events.")
         send_batch_to_hec(event_queue, target, token, index, sourcetype)
         event_queue = []
         LAST_BATCH_SENT = datetime.now()
@@ -185,11 +185,15 @@ def send_batch_to_hec(events, target, token, index, sourcetype):
 def backfill_metrics(
     variation_pct, ref_sample, days, target, token, index, sourcetype, mode, sparse_time
 ):
+    print(
+        f"Starting backfill process in {mode} mode with sparse time {sparse_time} seconds"
+    )
     end_time = datetime.now()
     start_time = end_time - timedelta(days=days)
     current_time = start_time
 
     while current_time <= end_time:
+        print(f"Generating metric for time: {current_time}")
         if mode == "sparse":
             metric = generate_sparse_metric(current_time, ref_sample, sparse_time, mode)
         else:
@@ -198,6 +202,7 @@ def backfill_metrics(
         metric["time"] = int(current_time.timestamp())
         add_event_to_queue(metric, target, token, index, sourcetype, force_send=True)
         current_time += timedelta(seconds=sparse_time)
+    print("Backfill process completed.")
 
 
 def main():
