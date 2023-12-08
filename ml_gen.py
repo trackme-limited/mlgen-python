@@ -179,7 +179,8 @@ def send_batch_to_hec(events, target, token, index, sourcetype):
             for event in events
         ]
     )
-    requests.post(url, headers=headers, data=data, verify=False)
+    response = requests.post(url, headers=headers, data=data, verify=False)
+    print(f"Response from Splunk HEC: {response.status_code}, {response.text}")
 
 
 def backfill_metrics(
