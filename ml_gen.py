@@ -195,25 +195,26 @@ def backfill_metrics(
 
     while current_time <= end_time:
         print(f"Generating metric for time: {current_time}")
-        if mode == "sparse":
-            metric = generate_sparse_metric(current_time, ref_sample, sparse_time, mode)
-        else:
-            metric = generate_metric_for_time(current_time, 0, ref_sample, mode="curve")
-
+        metric = (
+            generate_sparse_metric(current_time, ref_sample, sparse_time, mode)
+            if mode == "sparse"
+            else generate_metric_for_time(current_time, 0, ref_sample, mode="curve")
+        )
         metric["time"] = int(current_time.timestamp())
+
         add_event_to_queue(metric, target, token, index, sourcetype, force_send=False)
         current_time += timedelta(seconds=sparse_time)
 
-        # Check if the queue should be sent
+        # Send batch if conditions are met
         if (
             len(event_queue) >= MAX_BATCH_SIZE
             or (datetime.now() - LAST_BATCH_SENT).seconds >= 120
         ):
             send_batch_to_hec(event_queue, target, token, index, sourcetype)
-            event_queue = []  # Clear the queue after sending
+            event_queue = []
             LAST_BATCH_SENT = datetime.now()
 
-    # Send any remaining events in the queue after the backfilling is complete
+    # Send any remaining events in the queue
     if event_queue:
         send_batch_to_hec(event_queue, target, token, index, sourcetype)
         event_queue = []
