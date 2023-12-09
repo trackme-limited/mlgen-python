@@ -201,8 +201,23 @@ def backfill_metrics(
             metric = generate_metric_for_time(current_time, 0, ref_sample, mode="curve")
 
         metric["time"] = int(current_time.timestamp())
-        add_event_to_queue(metric, target, token, index, sourcetype, force_send=True)
+        add_event_to_queue(metric, target, token, index, sourcetype, force_send=False)
         current_time += timedelta(seconds=sparse_time)
+
+        # Check if the queue should be sent
+        if (
+            len(event_queue) >= MAX_BATCH_SIZE
+            or (datetime.now() - LAST_BATCH_SENT).seconds >= 120
+        ):
+            send_batch_to_hec(event_queue, target, token, index, sourcetype)
+            event_queue = []  # Clear the queue after sending
+            LAST_BATCH_SENT = datetime.now()
+
+    # Send any remaining events in the queue after the backfilling is complete
+    if event_queue:
+        send_batch_to_hec(event_queue, target, token, index, sourcetype)
+        event_queue = []
+
     print("Backfill process completed.")
 
 
