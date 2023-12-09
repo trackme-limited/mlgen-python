@@ -319,15 +319,16 @@ def main():
                 log_file.write(json.dumps(metric) + "\n")
 
         if args.send_hec == "true":
-            print(f"Adding metric to queue for sending to HEC")
-            add_event_to_queue(
-                metric,
-                args.target,
-                args.token,
-                args.index,
-                args.sourcetype,
-                force_send=True if args.mode != "sparse" else False,
-            )
+            if args.mode != "sparse":
+                print("Sending metric directly to Splunk HEC")
+                send_batch_to_hec(
+                    [metric], args.target, args.token, args.index, args.sourcetype
+                )
+            else:
+                print(f"Adding metric to queue for sending to HEC")
+                add_event_to_queue(
+                    metric, args.target, args.token, args.index, args.sourcetype
+                )
 
         time.sleep(interval)
 
