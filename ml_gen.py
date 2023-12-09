@@ -23,6 +23,7 @@ def generate_sparse_metric(dt, ref_sample, sparse_interval, mode):
 
     weekday = dt.strftime("%A")
     hour = dt.hour
+    human_readable_time = dt.strftime("%c")  # Convert to human-readable time
 
     # Use the same logic for getting ranges and applying multipliers
     # However, ensure that the data point is sparse by considering the sparse interval
@@ -37,6 +38,7 @@ def generate_sparse_metric(dt, ref_sample, sparse_interval, mode):
 
     return {
         "time": int(dt.timestamp()),
+        "time_human": human_readable_time,
         "dcount_hosts": int(dcount),
         "events_count": int(events),
         "ref_sample": ref_sample,
@@ -107,6 +109,7 @@ def get_day_ranges(day, variation_pct=0):
 def generate_metric_for_time(dt, variation_pct, ref_sample, mode):
     weekday = dt.strftime("%A")
     hour = dt.hour
+    human_readable_time = dt.strftime("%c")
 
     # Get the original ranges without variation
     original_ranges = get_day_ranges(weekday)
@@ -140,6 +143,7 @@ def generate_metric_for_time(dt, variation_pct, ref_sample, mode):
 
     return {
         "time": int(dt.timestamp()),
+        "time_human": human_readable_time,
         "dcount_hosts": dcount,
         "events_count": events,
         "ref_sample": ref_sample,
