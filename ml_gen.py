@@ -302,6 +302,7 @@ def main():
 
     while True:
         now = datetime.now()
+        print(f"Generating metric in normal mode for time: {now}")  # Debug print
 
         if args.mode == "sparse":
             metric = generate_sparse_metric(
@@ -314,11 +315,15 @@ def main():
 
         if args.write_local == "true":
             with open("ml_event_sampler.log", "a") as log_file:
+                print(f"Writing metric to local file")  # Debug print
                 log_file.write(json.dumps(metric) + "\n")
+
         if args.send_hec == "true":
+            print(f"Adding metric to queue for sending to HEC")  # Debug print
             add_event_to_queue(
                 metric, args.target, args.token, args.index, args.sourcetype
             )
+
         time.sleep(interval)
 
 
