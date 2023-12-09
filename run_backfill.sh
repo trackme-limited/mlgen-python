@@ -9,4 +9,4 @@ fi
 echo "Generating ref_sample: $ref"
 
 # run
-python3 ml_gen.py --mode curve --backfill true --variation_pct 0 --ref_sample $ref --write_local false --send_hec true --index $target_idx --sourcetype _json --token $token --target $target_hec
+python3 ml_gen.py --verbose true --verbose true --mode curve --backfill true --variation_pct 0 --ref_sample $ref --write_local false --send_hec true --index $target_idx --sourcetype _json --token $token --target $target_hec

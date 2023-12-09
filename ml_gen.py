@@ -188,20 +188,31 @@ def send_batch_to_hec(events, target, token, index, sourcetype):
 
 
 def backfill_metrics(
-    variation_pct, ref_sample, days, target, token, index, sourcetype, mode, sparse_time
+    variation_pct,
+    ref_sample,
+    days,
+    target,
+    token,
+    index,
+    sourcetype,
+    mode,
+    sparse_time,
+    verbose=False,
 ):
     global event_queue  # Add this line
     global LAST_BATCH_SENT  # Add this line to access the global variable
 
-    print(
-        f"Starting backfill process in {mode} mode with sparse time {sparse_time} seconds"
-    )
+    if verbose:
+        print(
+            f"Starting backfill process in {mode} mode with sparse time {sparse_time} seconds"
+        )
     end_time = datetime.now()
     start_time = end_time - timedelta(days=days)
     current_time = start_time
 
     while current_time <= end_time:
-        print(f"Generating metric for time: {current_time}")
+        if verbose:
+            print(f"Generating metric for time: {current_time}")
         metric = (
             generate_sparse_metric(current_time, ref_sample, sparse_time, mode)
             if mode == "sparse"
@@ -226,12 +237,19 @@ def backfill_metrics(
         send_batch_to_hec(event_queue, target, token, index, sourcetype)
         event_queue = []
 
-    print("Backfill process completed.")
+    if verbose:
+        print("Backfill process completed.")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Event generator script that can write events to a local file or send them to Splunk HEC."
+    )
+    parser.add_argument(
+        "--verbose",
+        type=lambda x: (str(x).lower() == "true"),  # Converts string to boolean
+        default=False,
+        help="Enable verbose output. Default is False.",
     )
     parser.add_argument(
         "--mode",
@@ -317,6 +335,7 @@ def main():
             args.sourcetype,
             args.mode,
             args.sparse_time,
+            verbose=args.verbose,
         )
 
     interval = 60  # Default interval for regular modes
@@ -325,7 +344,8 @@ def main():
 
     while True:
         now = datetime.now()
-        print(f"Generating metric in normal mode for time: {now}")
+        if args.verbose:
+            print(f"Generating metric in normal mode for time: {now}")
 
         if args.mode == "sparse":
             metric = generate_sparse_metric(
@@ -338,17 +358,20 @@ def main():
 
         if args.write_local == "true":
             with open("ml_event_sampler.log", "a") as log_file:
-                print(f"Writing metric to local file")
+                if args.verbose:
+                    print(f"Writing metric to local file")
                 log_file.write(json.dumps(metric) + "\n")
 
         if args.send_hec == "true":
             if args.mode == "sparse" and args.backfill == "false":
-                print("Sending metric directly to Splunk HEC")
+                if args.verbose:
+                    print("Sending metric directly to Splunk HEC")
                 send_batch_to_hec(
                     [metric], args.target, args.token, args.index, args.sourcetype
                 )
             else:
-                print(f"Adding metric to queue for sending to HEC")
+                if args.verbose:
+                    print(f"Adding metric to queue for sending to HEC")
                 add_event_to_queue(
                     metric, args.target, args.token, args.index, args.sourcetype
                 )
