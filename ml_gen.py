@@ -186,6 +186,9 @@ def send_batch_to_hec(events, target, token, index, sourcetype):
 def backfill_metrics(
     variation_pct, ref_sample, days, target, token, index, sourcetype, mode, sparse_time
 ):
+    global event_queue  # Add this line
+    global LAST_BATCH_SENT  # Add this line to access the global variable
+
     print(
         f"Starting backfill process in {mode} mode with sparse time {sparse_time} seconds"
     )
