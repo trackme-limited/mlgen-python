@@ -319,7 +319,7 @@ def main():
                 log_file.write(json.dumps(metric) + "\n")
 
         if args.send_hec == "true":
-            if args.mode != "sparse":
+            if args.mode == "sparse" and args.backfill == "false":
                 print("Sending metric directly to Splunk HEC")
                 send_batch_to_hec(
                     [metric], args.target, args.token, args.index, args.sourcetype
