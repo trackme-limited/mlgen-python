@@ -1,63 +1,153 @@
-# Python ML sample generator
+# ML Gen — Synthetic Metrics Generator for TrackMe
 
 See: https://docs.trackme-solutions.com/
 
-## Introduction
+## Overview
 
-**This Python events generator is designed to:**
+ML Gen generates synthetic time-series data for testing and qualifying TrackMe's Machine Learning Outlier Detection. It produces two key metrics (`dcount_hosts` and `events_count`) with realistic seasonality patterns (day-of-week and hour-of-day variations) and sends them to Splunk via HEC.
 
-- Generate and backfill data in Splunk with two metrics, dcount_hosts and events_count
-- Generate metrics with concepts of variations and seasonality for ML Outliers detection purposes
-- Allow generating an incident with a lower bound outliers, or upper bound outliers to simulate true conditions of issues affecting an entity
-- Validate the detection with TrackMe Outliers detection
-- Data is sent to an HEC event endpoint and would be parsed for Splunk indexing (direct to Splunk, or via Cribl Logstream)
+### Key Features
 
-**Several simple Shell wrappers will be called:**
+- **Multi-entity**: generates data for multiple entities simultaneously, each with unique baselines
+- **Mixed behaviors**: entities can run in normal mode (clean baseline), lower outlier mode (dip), or upper outlier mode (spike)
+- **Instance tracking**: each container run gets a unique `instance_id` — restart the container to get a fresh instance for TrackMe
+- **Backfill support**: populate historical data (default: 90 days) for ML model training, then automatically transitions to continuous generation
+- **HEC resilience**: retry with exponential backoff on HEC failures — the generator survives transient outages without crashing
+- **Docker-first**: runs as a container via Docker Compose, configured entirely through a `.env` file
 
-- ``run_backfill.sh``: calls the generator to backfill metrics for the past 90 days, do not generate an outlier but continously generate metrics with normal behaviours as long as it runs
-- ``run_normal.sh``: calls the generator without any backfill, general normal behaviours as long as it runs
-- ``run_gen_lower_outliers.sh``: calls the generator to immediately start generating a lower bound outlier influenced by a variation percentage (-75% in curve mode)
-- ``run_gen_upper_outliers.sh``: calls the generator to immediately start generating an upper bound outlier influenced by a variation percentage (+75% in curve mode)
+## Quick Start
 
-**The sequence is therefore:**
+### 1. Clone and configure
 
-- **Step 1**, call ``run_backfill.sh`` and wait until metrics are generator for the real time now period
-- **Step 2**, stop the script, and run any of the 3 scripts corresponding to each scenario
-- You can also generate a lower or upper bound outlier, then stop the script and run the ``run_normal.sh`` to simulate the end of an anomaly, and conditions coming back to normal
+```bash
+git clone https://github.com/trackme-limited/mlgen-python.git
+cd mlgen-python
+cp .env.example .env
+# Edit .env with your HEC endpoint, token, and desired settings
+```
 
-## Howto
+### 2. Run with Docker Compose
 
-### Setup the config file
+```bash
+# Build and start
+docker compose up -d --build
 
-Create a copy of "config.template" to "config" and setup your HEC target.
+# View logs
+docker compose logs -f
 
-**The file "config" should be in the current directory and would contain:**
+# Restart (generates a new instance_id for fresh tracking)
+docker compose restart
 
-    # index target
-    export target_idx="mlgen"
+# Stop
+docker compose down
+```
 
-    # HEC token
-    export token="xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
+### 3. Typical workflow
 
-    # HEC target
-    export target_hec="myhec.mydomain.com:8088"
+**Step 1 — Backfill historical data** (set `MODE=backfill` in `.env`):
 
-    # change this value to generate a new entity
-    export ref="sample001"
+```bash
+docker compose up -d --build
+docker compose logs -f
+# Wait for backfill to complete, then it automatically transitions to continuous mode
+```
 
-### Ensures Splunk is ready to parse the data
+**Step 2 — Switch to normal continuous mode** (set `MODE=normal` in `.env`):
 
-**A typical event will be sent in JSON format as:**
+```bash
+docker compose up -d --build
+```
 
-    {
-        "time": 1697273003,
-        "dcount_hosts": 370,
-        "events_count": 2343964,
-        "ref_sample": "sample102"
-    }
+**Step 3 — Test outlier detection**: adjust `NUM_LOWER_OUTLIER` / `NUM_UPPER_OUTLIER` in `.env` and restart.
 
-**The Shell script define the sourcetype as _json with the argument:**
+## Configuration
 
-    --sourcetype _json
+All settings are controlled via the `.env` file (copy from `.env.example`):
 
-Splunk should be capable of properly parsing the time stamp, and extracting metrics at search time.
+| Variable | Default | Description |
+|---|---|---|
+| `SPLUNK_HEC_URL` | `https://localhost:8088` | Splunk HEC endpoint URL |
+| `SPLUNK_HEC_TOKEN` | *(required)* | HEC authentication token |
+| `SPLUNK_INDEX` | `mlgen` | Target Splunk index |
+| `SPLUNK_SOURCETYPE` | `_json` | Event sourcetype |
+| `SSL_VERIFY` | `false` | Verify SSL certificates |
+| `MODE` | `normal` | `backfill` (history + continuous) or `normal` (continuous only) |
+| `BACKFILL_DAYS` | `90` | Days of historical data to generate in backfill mode |
+| `BACKFILL_INTERVAL` | `60` | Seconds between data points during backfill |
+| `NUM_NORMAL` | `5` | Number of entities generating normal (baseline) data |
+| `NUM_LOWER_OUTLIER` | `1` | Number of entities generating lower-bound outliers |
+| `NUM_UPPER_OUTLIER` | `1` | Number of entities generating upper-bound outliers |
+| `VARIATION_PCT` | `75` | Variation percentage for outlier entities (e.g. 75 = +/-75%) |
+| `ENTITY_PREFIX` | `sample` | Prefix for entity names (`sample_001`, `sample_002`, ...) |
+| `GENERATION_INTERVAL` | `60` | Seconds between data points in continuous mode |
+| `HEC_BATCH_SIZE` | `1000` | Events per HEC batch |
+| `SEASONALITY_MODE` | `curve` | `curve` (sine wave peaking at noon) or `stdev` (Gaussian peaking at 18h) |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `DRY_RUN` | `false` | Generate events without sending to HEC |
+
+## Event Format
+
+Each event sent to Splunk looks like:
+
+```json
+{
+    "time": 1697273003,
+    "time_human": "Fri Oct 14 10:30:03 2023",
+    "dcount_hosts": 742,
+    "events_count": 5123456,
+    "ref": "sample_001",
+    "instance_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+| Field | Description |
+|---|---|
+| `time` | Unix timestamp |
+| `time_human` | Human-readable timestamp |
+| `dcount_hosts` | Simulated distinct host count |
+| `events_count` | Simulated event volume |
+| `ref` | Entity identifier (e.g. `sample_001`) — use this as the entity key in TrackMe |
+| `instance_id` | UUID generated at container start — changes on every restart |
+
+## Entity Behaviors
+
+- **Normal** (`NUM_NORMAL`): generates baseline data with realistic day-of-week and hour-of-day seasonality. During backfill, all entities use normal behavior to build a clean ML training baseline.
+- **Lower outlier** (`NUM_LOWER_OUTLIER`): generates metrics reduced by `VARIATION_PCT`% (e.g. 75% = metrics at 25% of baseline). Simulates data drops, resource depletion, or feed failures.
+- **Upper outlier** (`NUM_UPPER_OUTLIER`): generates metrics increased by `VARIATION_PCT`% (e.g. 75% = metrics at 175% of baseline). Simulates data surges, log storms, or duplicate ingestion.
+
+Each entity gets a unique baseline range and scale factor, so they look distinct in Splunk dashboards.
+
+## Instance ID
+
+The `instance_id` field is a UUID generated once when the container starts. This means:
+
+- **Same container run** = same `instance_id` across all entities and all events
+- **Restart the container** = new `instance_id`
+- Use the `instance_id` in TrackMe to distinguish between different test runs
+- Combined with `ref` (entity name), you can filter to a specific entity within a specific run
+
+## Seasonality Patterns
+
+The generator simulates realistic data patterns:
+
+- **Day-of-week**: Monday is peak (1.0x), weekdays taper slightly, Saturday (0.7x) and Sunday (0.6x) are lowest
+- **Hour-of-day** (two modes):
+  - `curve`: sine wave peaking at noon — good for business-hours patterns
+  - `stdev`: Gaussian peaking at 18h — good for end-of-day batch patterns
+
+## HEC Resilience
+
+The generator is designed to survive HEC failures:
+
+- **Retry with exponential backoff**: failed sends are retried up to 5 times with 2s / 4s / 8s / 16s / 32s delays
+- **Graceful degradation**: if all retries fail, events are dropped with a warning and the generator continues
+- **No crash on network errors**: connection refused, timeouts, and HTTP errors are all handled
+- **Graceful shutdown**: SIGTERM/SIGINT triggers a clean shutdown with queue drain
+
+## Splunk Setup
+
+Ensure Splunk is configured to receive the data:
+
+1. Create the target index (default: `mlgen`)
+2. Configure an HEC token with access to the target index
+3. Splunk will auto-parse the `_json` sourcetype and extract fields at search time
