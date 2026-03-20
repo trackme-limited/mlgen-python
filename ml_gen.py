@@ -187,21 +187,32 @@ class EntityProfile:
         return self.behavior if self.is_in_anomaly else "normal"
 
     def maybe_transition(self, now: datetime, rng: random.Random, logger: logging.Logger,
-                         anomaly_durations: list[int], normal_durations: list[int]):
+                         anomaly_durations: list[int], normal_durations: list[int],
+                         start_in_anomaly: bool = False):
         """Check if it's time to transition between anomaly and normal phases."""
         if not self.is_outlier():
             return
 
-        # First call — start in normal phase with a random duration
+        # First call — initialize the phase
         if self.phase_end_time is None:
-            # Start with a shorter normal phase so anomalies kick in sooner
-            initial_hours = rng.choice([2, 4, 6, 8])
-            self.phase_end_time = now + timedelta(hours=initial_hours)
-            self.is_in_anomaly = False
-            logger.info(
-                "  Entity %s: starting in normal phase, first anomaly in %dh",
-                self.ref, initial_hours,
-            )
+            if start_in_anomaly:
+                # Start directly in anomaly phase (no waiting)
+                duration_hours = rng.choice(anomaly_durations)
+                self.is_in_anomaly = True
+                self.phase_end_time = now + timedelta(hours=duration_hours)
+                logger.info(
+                    "  Entity %s: starting immediately in %s anomaly for %dh",
+                    self.ref, self.behavior, duration_hours,
+                )
+            else:
+                # Start in normal phase, anomaly comes later
+                initial_hours = rng.choice(normal_durations)
+                self.phase_end_time = now + timedelta(hours=initial_hours)
+                self.is_in_anomaly = False
+                logger.info(
+                    "  Entity %s: starting in normal phase, first anomaly in %dh",
+                    self.ref, initial_hours,
+                )
             return
 
         if now < self.phase_end_time:
@@ -583,11 +594,18 @@ def run_continuous(
     normal_durations = config["normal_durations"]
     rng = random.Random()
 
-    # Initialize anomaly cycling for all outlier entities
+    # Initialize anomaly cycling for outlier entities.
+    # Half start immediately in anomaly, half start in normal phase — this
+    # creates a staggered, realistic mix from the very first minute.
     now = datetime.now(timezone.utc)
     logger.info("Initializing anomaly cycling for outlier entities...")
-    for entity in entities:
-        entity.maybe_transition(now, rng, logger, anomaly_durations, normal_durations)
+    outlier_entities = [e for e in entities if e.is_outlier()]
+    rng.shuffle(outlier_entities)
+    half = max(1, len(outlier_entities) // 2)
+    for i, entity in enumerate(outlier_entities):
+        start_in_anomaly = i < half
+        entity.maybe_transition(now, rng, logger, anomaly_durations, normal_durations,
+                                start_in_anomaly=start_in_anomaly)
 
     logger.info("Starting continuous generation (interval=%ds)...", interval)
     cycle = 0
