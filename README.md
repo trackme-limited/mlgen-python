@@ -68,6 +68,8 @@ All settings are controlled via the `.env` file (copy from `.env.example`):
 | `NUM_LOWER_OUTLIER` | `1` | Number of entities generating lower-bound outliers |
 | `NUM_UPPER_OUTLIER` | `1` | Number of entities generating upper-bound outliers |
 | `VARIATION_PCT` | `75` | Variation percentage for outlier entities (e.g. 75 = +/-75%) |
+| `ANOMALY_DURATIONS` | `4,8,12,24` | Comma-separated hours — how long each anomaly lasts (random pick) |
+| `NORMAL_DURATIONS` | `12,24,48,72` | Comma-separated hours — how long normal lasts between anomalies (random pick) |
 | `ENTITY_PREFIX` | `sample` | Prefix for entity names (`sample_001`, `sample_002`, ...) |
 | `GENERATION_INTERVAL` | `60` | Seconds between data points in continuous mode |
 | `HEC_BATCH_SIZE` | `1000` | Events per HEC batch |
@@ -101,11 +103,24 @@ Each event sent to Splunk looks like:
 
 ## Entity Behaviors
 
-- **Normal** (`NUM_NORMAL`): generates baseline data with realistic day-of-week and hour-of-day seasonality. During backfill, all entities use normal behavior to build a clean ML training baseline.
-- **Lower outlier** (`NUM_LOWER_OUTLIER`): generates metrics reduced by `VARIATION_PCT`% (e.g. 75% = metrics at 25% of baseline). Simulates data drops, resource depletion, or feed failures.
-- **Upper outlier** (`NUM_UPPER_OUTLIER`): generates metrics increased by `VARIATION_PCT`% (e.g. 75% = metrics at 175% of baseline). Simulates data surges, log storms, or duplicate ingestion.
+- **Normal** (`NUM_NORMAL`): generates baseline data with realistic day-of-week and hour-of-day seasonality. These entities always produce clean data.
+- **Lower outlier** (`NUM_LOWER_OUTLIER`): simulates data drops, resource depletion, or feed failures (metrics reduced by `VARIATION_PCT`%).
+- **Upper outlier** (`NUM_UPPER_OUTLIER`): simulates data surges, log storms, or duplicate ingestion (metrics increased by `VARIATION_PCT`%).
 
 Each entity gets a unique baseline range and scale factor, so they look distinct in Splunk dashboards.
+
+### Anomaly Cycling
+
+Outlier entities don't generate anomalies permanently — they automatically cycle between **anomaly** and **normal** phases to simulate realistic incident lifecycles:
+
+1. After backfill completes, outlier entities start in a short **normal phase** (2-8h random)
+2. Then they enter an **anomaly phase** for a random duration picked from `ANOMALY_DURATIONS` (default: 4, 8, 12, or 24 hours)
+3. The anomaly resolves and they return to **normal** for a duration from `NORMAL_DURATIONS` (default: 12, 24, 48, or 72 hours)
+4. The cycle repeats indefinitely
+
+This reproduces real-world scenarios where issues occur, get addressed, the entity comes back to a healthy state, and eventually another incident happens. The periodic logging shows which entities currently have active anomalies.
+
+During **backfill**, all entities (including outlier ones) generate normal data to ensure a clean ML training baseline.
 
 ## Instance ID
 

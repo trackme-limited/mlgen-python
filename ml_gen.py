@@ -57,6 +57,13 @@ def load_config() -> dict:
         "num_upper_outlier": int(os.environ.get("NUM_UPPER_OUTLIER", "1")),
         # Outlier variation percentage (applied as +/- to baseline)
         "variation_pct": int(os.environ.get("VARIATION_PCT", "75")),
+        # Anomaly cycling: comma-separated hours for anomaly and normal durations
+        "anomaly_durations": [
+            int(h) for h in os.environ.get("ANOMALY_DURATIONS", "4,8,12,24").split(",")
+        ],
+        "normal_durations": [
+            int(h) for h in os.environ.get("NORMAL_DURATIONS", "12,24,48,72").split(",")
+        ],
         # Generation settings
         "generation_interval": int(os.environ.get("GENERATION_INTERVAL", "60")),
         "backfill_interval": int(os.environ.get("BACKFILL_INTERVAL", "60")),
@@ -126,6 +133,13 @@ DAY_MULTIPLIERS = {
     "Sunday": 0.60,
 }
 
+# Anomaly cycling durations (in hours)
+# Outlier entities pick random durations from these lists to simulate
+# realistic incident lifecycles: anomaly happens, gets fixed, normal for
+# a while, then another anomaly occurs.
+DEFAULT_ANOMALY_DURATIONS = [4, 8, 12, 24]      # How long an anomaly lasts
+DEFAULT_NORMAL_DURATIONS = [12, 24, 48, 72]      # How long normal lasts between anomalies
+
 
 class EntityProfile:
     """Represents a single entity with its own baseline and behavior."""
@@ -135,6 +149,65 @@ class EntityProfile:
         self.behavior = behavior  # "normal", "lower_outlier", "upper_outlier"
         self.baseline = baseline  # {"dcount_hosts": (lo, hi), "events_count": (lo, hi)}
         self.scale_factor = scale_factor  # Unique per-entity multiplier (0.8 - 1.2)
+
+        # Anomaly cycling state (only used for outlier entities in continuous mode)
+        self.is_in_anomaly = False
+        self.phase_end_time: datetime | None = None  # When the current phase ends
+
+    def is_outlier(self) -> bool:
+        """Whether this entity is configured as an outlier (lower or upper)."""
+        return self.behavior in ("lower_outlier", "upper_outlier")
+
+    def get_effective_behavior(self) -> str:
+        """Return the current effective behavior, accounting for anomaly cycling.
+
+        Outlier entities alternate between anomaly and normal phases.
+        Normal entities always return 'normal'.
+        """
+        if not self.is_outlier():
+            return "normal"
+        return self.behavior if self.is_in_anomaly else "normal"
+
+    def maybe_transition(self, now: datetime, rng: random.Random, logger: logging.Logger,
+                         anomaly_durations: list[int], normal_durations: list[int]):
+        """Check if it's time to transition between anomaly and normal phases."""
+        if not self.is_outlier():
+            return
+
+        # First call — start in normal phase with a random duration
+        if self.phase_end_time is None:
+            # Start with a shorter normal phase so anomalies kick in sooner
+            initial_hours = rng.choice([2, 4, 6, 8])
+            self.phase_end_time = now + timedelta(hours=initial_hours)
+            self.is_in_anomaly = False
+            logger.info(
+                "  Entity %s: starting in normal phase, first anomaly in %dh",
+                self.ref, initial_hours,
+            )
+            return
+
+        if now < self.phase_end_time:
+            return  # Still in current phase
+
+        # Time to transition
+        if self.is_in_anomaly:
+            # Anomaly → Normal (issue was "fixed")
+            duration_hours = rng.choice(normal_durations)
+            self.is_in_anomaly = False
+            self.phase_end_time = now + timedelta(hours=duration_hours)
+            logger.info(
+                "  Entity %s: anomaly resolved — back to normal for %dh",
+                self.ref, duration_hours,
+            )
+        else:
+            # Normal → Anomaly (new incident)
+            duration_hours = rng.choice(anomaly_durations)
+            self.is_in_anomaly = True
+            self.phase_end_time = now + timedelta(hours=duration_hours)
+            logger.info(
+                "  Entity %s: new %s anomaly started — will last %dh",
+                self.ref, self.behavior, duration_hours,
+            )
 
 
 def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfile]:
@@ -210,11 +283,13 @@ def generate_metric(
     events_lo = int(events_lo * day_mult)
     events_hi = int(events_hi * day_mult)
 
-    # Apply variation for outlier entities
+    # Apply variation based on current effective behavior
+    # (outlier entities cycle between anomaly and normal phases)
+    effective_behavior = entity.get_effective_behavior()
     effective_variation = 0
-    if entity.behavior == "lower_outlier":
+    if effective_behavior == "lower_outlier":
         effective_variation = -abs(variation_pct)
-    elif entity.behavior == "upper_outlier":
+    elif effective_behavior == "upper_outlier":
         effective_variation = abs(variation_pct)
 
     if effective_variation != 0:
@@ -450,13 +525,27 @@ def run_continuous(
     hec: HECSender,
     logger: logging.Logger,
 ):
-    """Generate metrics continuously at the configured interval."""
+    """Generate metrics continuously at the configured interval.
+
+    Outlier entities automatically cycle between anomaly and normal phases:
+    - Anomaly phase: entity generates outlier data (lower or upper bound)
+    - Normal phase: entity generates clean baseline data (issue "fixed")
+    Durations are randomized from ANOMALY_DURATIONS / NORMAL_DURATIONS.
+    """
     global _running
 
     interval = config["generation_interval"]
     variation_pct = config["variation_pct"]
     seasonality_mode = config["seasonality_mode"]
+    anomaly_durations = config["anomaly_durations"]
+    normal_durations = config["normal_durations"]
     rng = random.Random()
+
+    # Initialize anomaly cycling for all outlier entities
+    now = datetime.now(timezone.utc)
+    logger.info("Initializing anomaly cycling for outlier entities...")
+    for entity in entities:
+        entity.maybe_transition(now, rng, logger, anomaly_durations, normal_durations)
 
     logger.info("Starting continuous generation (interval=%ds)...", interval)
     cycle = 0
@@ -465,6 +554,10 @@ def run_continuous(
         cycle_start = time.time()
         cycle += 1
         now = datetime.now(timezone.utc)
+
+        # Check for phase transitions on outlier entities
+        for entity in entities:
+            entity.maybe_transition(now, rng, logger, anomaly_durations, normal_durations)
 
         for entity in entities:
             metric = generate_metric(
@@ -478,9 +571,14 @@ def run_continuous(
         if cycle % 10 == 0 or cycle == 1:
             day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             time_tag = f"{day_names[now.weekday()]} {now.hour:02d}:{now.minute:02d} UTC"
+
+            # Show current state of outlier entities
+            anomaly_active = [e.ref for e in entities if e.is_in_anomaly]
+            anomaly_str = ", ".join(anomaly_active) if anomaly_active else "none"
+
             logger.info(
-                "Cycle %d [%s]: %d entities | sent: %d | failed: %d",
-                cycle, time_tag, len(entities), hec.total_sent, hec.total_failed,
+                "Cycle %d [%s]: %d entities | sent: %d | failed: %d | anomalies active: %s",
+                cycle, time_tag, len(entities), hec.total_sent, hec.total_failed, anomaly_str,
             )
 
         # Sleep remainder of interval
