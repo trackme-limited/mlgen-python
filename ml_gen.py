@@ -595,17 +595,20 @@ def run_continuous(
     rng = random.Random()
 
     # Initialize anomaly cycling for outlier entities.
-    # Half start immediately in anomaly, half start in normal phase — this
-    # creates a staggered, realistic mix from the very first minute.
+    # ALL outlier entities start immediately in anomaly right after backfill
+    # so the effect is visible within minutes. After their first anomaly
+    # window expires, each entity cycles independently (anomaly → normal → anomaly...).
     now = datetime.now(timezone.utc)
     logger.info("Initializing anomaly cycling for outlier entities...")
-    outlier_entities = [e for e in entities if e.is_outlier()]
-    rng.shuffle(outlier_entities)
-    half = max(1, len(outlier_entities) // 2)
-    for i, entity in enumerate(outlier_entities):
-        start_in_anomaly = i < half
-        entity.maybe_transition(now, rng, logger, anomaly_durations, normal_durations,
-                                start_in_anomaly=start_in_anomaly)
+    for entity in entities:
+        if entity.is_outlier():
+            duration_hours = rng.choice(anomaly_durations)
+            entity.is_in_anomaly = True
+            entity.phase_end_time = now + timedelta(hours=duration_hours)
+            logger.info(
+                "  Entity %s: starting %s anomaly NOW — will last %dh",
+                entity.ref, entity.behavior, duration_hours,
+            )
 
     logger.info("Starting continuous generation (interval=%ds)...", interval)
     cycle = 0
