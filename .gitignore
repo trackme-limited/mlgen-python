@@ -1,6 +1,19 @@
-archives
-.vscode
-run_trackme.sh
-# Mac OS X cached files
-.DS_Store
+# Environment configuration (contains secrets)
+.env
+
+# Legacy config file
 config
+
+# Archives
+archives/
+
+# Editor
+.vscode/
+
+# Mac OS X
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
