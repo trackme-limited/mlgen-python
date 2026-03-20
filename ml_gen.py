@@ -62,7 +62,7 @@ def load_config() -> dict:
             int(h) for h in os.environ.get("ANOMALY_DURATIONS", "12,24,48").split(",")
         ],
         "normal_durations": [
-            int(h) for h in os.environ.get("NORMAL_DURATIONS", "12,24,48,72").split(",")
+            int(h) for h in os.environ.get("NORMAL_DURATIONS", "48,72,96,168").split(",")
         ],
         # Generation settings
         "generation_interval": int(os.environ.get("GENERATION_INTERVAL", "60")),
@@ -156,7 +156,7 @@ DAY_MULTIPLIERS = {
 # realistic incident lifecycles: anomaly happens, gets fixed, normal for
 # a while, then another anomaly occurs.
 DEFAULT_ANOMALY_DURATIONS = [12, 24, 48]          # How long an anomaly lasts
-DEFAULT_NORMAL_DURATIONS = [12, 24, 48, 72]      # How long normal lasts between anomalies
+DEFAULT_NORMAL_DURATIONS = [48, 72, 96, 168]     # How long normal lasts between anomalies
 
 
 class EntityProfile:

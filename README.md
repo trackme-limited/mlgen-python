@@ -69,7 +69,7 @@ All settings are controlled via the `.env` file (copy from `.env.example`):
 | `NUM_UPPER_OUTLIER` | `1` | Number of entities generating upper-bound outliers |
 | `VARIATION_PCT` | `75` | Variation percentage for outlier entities (e.g. 75 = +/-75%) |
 | `ANOMALY_DURATIONS` | `12,24,48` | Comma-separated hours — how long each anomaly lasts (random pick) |
-| `NORMAL_DURATIONS` | `12,24,48,72` | Comma-separated hours — how long normal lasts between anomalies (random pick) |
+| `NORMAL_DURATIONS` | `48,72,96,168` | Comma-separated hours — how long normal lasts between anomalies (random pick) |
 | `ENTITY_PREFIX` | `custom` | Fallback prefix for extra entities beyond the 20 built-in catalog names |
 | `GENERATION_INTERVAL` | `60` | Seconds between data points in continuous mode |
 | `HEC_BATCH_SIZE` | `1000` | Events per HEC batch |
@@ -117,7 +117,7 @@ Outlier entities don't generate anomalies permanently — they automatically cyc
 
 1. After backfill completes, outlier entities start in a short **normal phase** (2-8h random)
 2. Then they enter an **anomaly phase** for a random duration picked from `ANOMALY_DURATIONS` (default: 12, 24, or 48 hours)
-3. The anomaly resolves and they return to **normal** for a duration from `NORMAL_DURATIONS` (default: 12, 24, 48, or 72 hours)
+3. The anomaly resolves and they return to **normal** for a duration from `NORMAL_DURATIONS` (default: 48, 72, 96, or 168 hours)
 4. The cycle repeats indefinitely
 
 This reproduces real-world scenarios where issues occur, get addressed, the entity comes back to a healthy state, and eventually another incident happens. The periodic logging shows which entities currently have active anomalies.
