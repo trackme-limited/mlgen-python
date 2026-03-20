@@ -633,13 +633,22 @@ def run_continuous(
             time_tag = f"{day_names[now.weekday()]} {now.hour:02d}:{now.minute:02d} UTC"
 
             # Show current state of outlier entities
-            anomaly_active = [e.ref for e in entities if e.is_in_anomaly]
-            anomaly_str = ", ".join(anomaly_active) if anomaly_active else "none"
+            anomaly_details = []
+            for e in entities:
+                if e.is_outlier():
+                    state = "ANOMALY" if e.is_in_anomaly else "normal"
+                    remaining = ""
+                    if e.phase_end_time:
+                        delta = e.phase_end_time - now
+                        remaining = f" ({delta.total_seconds()/3600:.1f}h left)"
+                    anomaly_details.append(f"{e.ref}={state}{remaining}")
 
             logger.info(
-                "Cycle %d [%s]: %d entities | sent: %d | failed: %d | anomalies active: %s",
-                cycle, time_tag, len(entities), hec.total_sent, hec.total_failed, anomaly_str,
+                "Cycle %d [%s]: %d entities | sent: %d | failed: %d",
+                cycle, time_tag, len(entities), hec.total_sent, hec.total_failed,
             )
+            for detail in anomaly_details:
+                logger.info("  Outlier: %s", detail)
 
         # Sleep remainder of interval
         elapsed = time.time() - cycle_start
