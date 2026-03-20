@@ -68,7 +68,7 @@ All settings are controlled via the `.env` file (copy from `.env.example`):
 | `NUM_LOWER_OUTLIER` | `1` | Number of entities generating lower-bound outliers |
 | `NUM_UPPER_OUTLIER` | `1` | Number of entities generating upper-bound outliers |
 | `VARIATION_PCT` | `75` | Variation percentage for outlier entities (e.g. 75 = +/-75%) |
-| `ANOMALY_DURATIONS` | `4,8,12,24` | Comma-separated hours — how long each anomaly lasts (random pick) |
+| `ANOMALY_DURATIONS` | `12,24,48` | Comma-separated hours — how long each anomaly lasts (random pick) |
 | `NORMAL_DURATIONS` | `12,24,48,72` | Comma-separated hours — how long normal lasts between anomalies (random pick) |
 | `ENTITY_PREFIX` | `custom` | Fallback prefix for extra entities beyond the 20 built-in catalog names |
 | `GENERATION_INTERVAL` | `60` | Seconds between data points in continuous mode |
@@ -116,7 +116,7 @@ Each entity gets a unique baseline range and scale factor, so they look distinct
 Outlier entities don't generate anomalies permanently — they automatically cycle between **anomaly** and **normal** phases to simulate realistic incident lifecycles:
 
 1. After backfill completes, outlier entities start in a short **normal phase** (2-8h random)
-2. Then they enter an **anomaly phase** for a random duration picked from `ANOMALY_DURATIONS` (default: 4, 8, 12, or 24 hours)
+2. Then they enter an **anomaly phase** for a random duration picked from `ANOMALY_DURATIONS` (default: 12, 24, or 48 hours)
 3. The anomaly resolves and they return to **normal** for a duration from `NORMAL_DURATIONS` (default: 12, 24, 48, or 72 hours)
 4. The cycle repeats indefinitely
 

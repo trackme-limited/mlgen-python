@@ -59,7 +59,7 @@ def load_config() -> dict:
         "variation_pct": int(os.environ.get("VARIATION_PCT", "75")),
         # Anomaly cycling: comma-separated hours for anomaly and normal durations
         "anomaly_durations": [
-            int(h) for h in os.environ.get("ANOMALY_DURATIONS", "4,8,12,24").split(",")
+            int(h) for h in os.environ.get("ANOMALY_DURATIONS", "12,24,48").split(",")
         ],
         "normal_durations": [
             int(h) for h in os.environ.get("NORMAL_DURATIONS", "12,24,48,72").split(",")
@@ -155,7 +155,7 @@ DAY_MULTIPLIERS = {
 # Outlier entities pick random durations from these lists to simulate
 # realistic incident lifecycles: anomaly happens, gets fixed, normal for
 # a while, then another anomaly occurs.
-DEFAULT_ANOMALY_DURATIONS = [4, 8, 12, 24]      # How long an anomaly lasts
+DEFAULT_ANOMALY_DURATIONS = [12, 24, 48]          # How long an anomaly lasts
 DEFAULT_NORMAL_DURATIONS = [12, 24, 48, 72]      # How long normal lasts between anomalies
 
 
