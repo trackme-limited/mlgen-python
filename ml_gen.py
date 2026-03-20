@@ -49,8 +49,7 @@ def load_config() -> dict:
         "hec_token": os.environ.get("SPLUNK_HEC_TOKEN", ""),
         "index": os.environ.get("SPLUNK_INDEX", "mlgen"),
         "sourcetype": os.environ.get("SPLUNK_SOURCETYPE", "_json"),
-        # Mode: backfill | normal
-        "mode": os.environ.get("MODE", "normal").lower(),
+        # Backfill settings
         "backfill_days": int(os.environ.get("BACKFILL_DAYS", "90")),
         # Entity counts by behavior
         "num_normal": int(os.environ.get("NUM_NORMAL", "5")),
@@ -526,7 +525,7 @@ def main():
     logger.info("  HEC URL:            %s", config["hec_url"])
     logger.info("  Index:              %s", config["index"])
     logger.info("  Sourcetype:         %s", config["sourcetype"])
-    logger.info("  Mode:               %s", config["mode"])
+    logger.info("  Backfill days:      %d", config["backfill_days"])
     logger.info("  Seasonality:        %s", config["seasonality_mode"])
     logger.info("  Entities:           %d total", total_entities)
     logger.info("    Normal:           %d", normal_count)
@@ -557,12 +556,11 @@ def main():
         dry_run=config["dry_run"],
     )
 
-    # Run backfill if requested
-    if config["mode"] == "backfill":
-        run_backfill(config, entities, instance_id, hec, logger)
-        logger.info("Backfill complete. Transitioning to continuous generation...")
+    # Phase 1: Backfill historical data (all entities use normal behavior)
+    run_backfill(config, entities, instance_id, hec, logger)
+    logger.info("Backfill complete. Transitioning to continuous generation...")
 
-    # Always run continuous generation after backfill (or directly)
+    # Phase 2: Continuous generation (entities follow their assigned behaviors)
     run_continuous(config, entities, instance_id, hec, logger)
 
     # Final flush

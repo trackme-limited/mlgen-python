@@ -42,23 +42,14 @@ docker compose restart
 docker compose down
 ```
 
-### 3. Typical workflow
+### 3. What happens on startup
 
-**Step 1 — Backfill historical data** (set `MODE=backfill` in `.env`):
+The generator is fully automated — no mode switching needed:
 
-```bash
-docker compose up -d --build
-docker compose logs -f
-# Wait for backfill to complete, then it automatically transitions to continuous mode
-```
+1. **Backfill phase**: generates `BACKFILL_DAYS` (default: 90) of historical data for all entities using **normal behavior** (clean baseline for ML model training)
+2. **Continuous phase**: automatically transitions to real-time generation where each entity follows its assigned behavior — normal entities stay normal, outlier entities start producing anomalies
 
-**Step 2 — Switch to normal continuous mode** (set `MODE=normal` in `.env`):
-
-```bash
-docker compose up -d --build
-```
-
-**Step 3 — Test outlier detection**: adjust `NUM_LOWER_OUTLIER` / `NUM_UPPER_OUTLIER` in `.env` and restart.
+To start fresh, just restart the container — you get a new `instance_id` and a clean backfill.
 
 ## Configuration
 
@@ -71,8 +62,7 @@ All settings are controlled via the `.env` file (copy from `.env.example`):
 | `SPLUNK_INDEX` | `mlgen` | Target Splunk index |
 | `SPLUNK_SOURCETYPE` | `_json` | Event sourcetype |
 | `SSL_VERIFY` | `false` | Verify SSL certificates |
-| `MODE` | `normal` | `backfill` (history + continuous) or `normal` (continuous only) |
-| `BACKFILL_DAYS` | `90` | Days of historical data to generate in backfill mode |
+| `BACKFILL_DAYS` | `90` | Days of historical data to backfill on startup |
 | `BACKFILL_INTERVAL` | `60` | Seconds between data points during backfill |
 | `NUM_NORMAL` | `5` | Number of entities generating normal (baseline) data |
 | `NUM_LOWER_OUTLIER` | `1` | Number of entities generating lower-bound outliers |
