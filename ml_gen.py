@@ -70,8 +70,8 @@ def load_config() -> dict:
         "hec_batch_size": int(os.environ.get("HEC_BATCH_SIZE", "1000")),
         # Seasonality mode: curve | stdev
         "seasonality_mode": os.environ.get("SEASONALITY_MODE", "curve").lower(),
-        # Entity naming prefix
-        "entity_prefix": os.environ.get("ENTITY_PREFIX", "sample"),
+        # Entity naming fallback prefix (used when more entities than catalog entries)
+        "entity_prefix": os.environ.get("ENTITY_PREFIX", "custom"),
         # Logging
         "log_level": os.environ.get("LOG_LEVEL", "INFO").upper(),
         "ssl_verify": os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes"),
@@ -110,16 +110,34 @@ def setup_logging(level: str):
 # Each entity gets its own baseline ranges (randomized at startup) so that
 # entities look distinct from each other in Splunk.
 
-# Base range templates — each entity will get a random pick scaled from these
-BASELINE_TEMPLATES = [
-    {"dcount_hosts": (700, 800), "events_count": (5_000_000, 5_500_000)},
-    {"dcount_hosts": (600, 700), "events_count": (4_500_000, 5_000_000)},
-    {"dcount_hosts": (550, 700), "events_count": (4_000_000, 4_500_000)},
-    {"dcount_hosts": (650, 750), "events_count": (4_500_000, 5_000_000)},
-    {"dcount_hosts": (500, 600), "events_count": (3_500_000, 4_000_000)},
-    {"dcount_hosts": (450, 550), "events_count": (3_000_000, 3_500_000)},
-    {"dcount_hosts": (800, 900), "events_count": (6_000_000, 6_500_000)},
-    {"dcount_hosts": (350, 450), "events_count": (2_500_000, 3_000_000)},
+# Realistic entity names that look like real Splunk data sources (index:sourcetype)
+# Each entity is paired with a baseline template for unique data profiles.
+ENTITY_CATALOG = [
+    # High-volume security feeds
+    {"ref": "security:linux_secure", "dcount_hosts": (700, 800), "events_count": (5_000_000, 5_500_000)},
+    {"ref": "security:WinEventLog:Security", "dcount_hosts": (800, 900), "events_count": (6_000_000, 6_500_000)},
+    {"ref": "network:cisco:asa", "dcount_hosts": (350, 450), "events_count": (4_000_000, 4_500_000)},
+    {"ref": "network:pan:traffic", "dcount_hosts": (250, 350), "events_count": (3_500_000, 4_000_000)},
+    # Mid-volume infra feeds
+    {"ref": "osnix:linux:audit", "dcount_hosts": (600, 700), "events_count": (4_500_000, 5_000_000)},
+    {"ref": "web:access_combined", "dcount_hosts": (450, 550), "events_count": (3_000_000, 3_500_000)},
+    {"ref": "infra:vmware:esxlog:hostd", "dcount_hosts": (150, 250), "events_count": (2_000_000, 2_500_000)},
+    {"ref": "infra:syslog", "dcount_hosts": (550, 700), "events_count": (4_000_000, 4_500_000)},
+    # Cloud & identity
+    {"ref": "cloud:aws:cloudtrail", "dcount_hosts": (100, 200), "events_count": (2_500_000, 3_000_000)},
+    {"ref": "cloud:mscs:azure:eventhub", "dcount_hosts": (200, 300), "events_count": (3_000_000, 3_500_000)},
+    {"ref": "cloud:o365:management:activity", "dcount_hosts": (50, 120), "events_count": (1_500_000, 2_000_000)},
+    {"ref": "identity:OktaIM2:log", "dcount_hosts": (30, 80), "events_count": (800_000, 1_200_000)},
+    # Windows & endpoints
+    {"ref": "wineventlog:WinEventLog:System", "dcount_hosts": (650, 750), "events_count": (4_500_000, 5_000_000)},
+    {"ref": "wineventlog:WinEventLog:Application", "dcount_hosts": (500, 600), "events_count": (3_500_000, 4_000_000)},
+    {"ref": "endpoint:XmlWinEventLog:Microsoft-Windows-Sysmon/Operational", "dcount_hosts": (400, 500), "events_count": (5_500_000, 6_000_000)},
+    # Application & business
+    {"ref": "applog:kafka:broker", "dcount_hosts": (20, 50), "events_count": (2_000_000, 2_500_000)},
+    {"ref": "applog:docker:container:json", "dcount_hosts": (300, 400), "events_count": (3_000_000, 3_500_000)},
+    {"ref": "database:oracle:audit", "dcount_hosts": (10, 30), "events_count": (500_000, 800_000)},
+    {"ref": "proxy:zscalernss-web", "dcount_hosts": (200, 350), "events_count": (4_000_000, 4_500_000)},
+    {"ref": "email:exchange:messagetracking", "dcount_hosts": (40, 80), "events_count": (1_000_000, 1_500_000)},
 ]
 
 # Day-of-week multipliers (relative to Monday baseline)
@@ -211,9 +229,20 @@ class EntityProfile:
 
 
 def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfile]:
-    """Build entity profiles with assigned behaviors."""
+    """Build entity profiles with assigned behaviors.
+
+    Entities are picked from ENTITY_CATALOG to get realistic names that look
+    like real Splunk index:sourcetype combinations. If more entities are needed
+    than available in the catalog, extras are generated with a prefix.
+    """
+    total_needed = config["num_normal"] + config["num_lower_outlier"] + config["num_upper_outlier"]
+
+    # Shuffle the catalog and pick entities
+    catalog = list(ENTITY_CATALOG)
+    rng.shuffle(catalog)
+
     profiles = []
-    entity_num = 1
+    entity_idx = 0
 
     for behavior, count in [
         ("normal", config["num_normal"]),
@@ -221,11 +250,24 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
         ("upper_outlier", config["num_upper_outlier"]),
     ]:
         for _ in range(count):
-            ref = f"{config['entity_prefix']}_{entity_num:03d}"
-            baseline = rng.choice(BASELINE_TEMPLATES)
+            if entity_idx < len(catalog):
+                entry = catalog[entity_idx]
+                ref = entry["ref"]
+                baseline = {
+                    "dcount_hosts": entry["dcount_hosts"],
+                    "events_count": entry["events_count"],
+                }
+            else:
+                # Fallback for when we need more entities than the catalog has
+                ref = f"{config['entity_prefix']}_{entity_idx + 1:03d}"
+                baseline = rng.choice([
+                    {"dcount_hosts": e["dcount_hosts"], "events_count": e["events_count"]}
+                    for e in ENTITY_CATALOG
+                ])
+
             scale_factor = rng.uniform(0.8, 1.2)
             profiles.append(EntityProfile(ref, behavior, baseline, scale_factor))
-            entity_num += 1
+            entity_idx += 1
 
     return profiles
 

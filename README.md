@@ -70,7 +70,7 @@ All settings are controlled via the `.env` file (copy from `.env.example`):
 | `VARIATION_PCT` | `75` | Variation percentage for outlier entities (e.g. 75 = +/-75%) |
 | `ANOMALY_DURATIONS` | `4,8,12,24` | Comma-separated hours — how long each anomaly lasts (random pick) |
 | `NORMAL_DURATIONS` | `12,24,48,72` | Comma-separated hours — how long normal lasts between anomalies (random pick) |
-| `ENTITY_PREFIX` | `sample` | Prefix for entity names (`sample_001`, `sample_002`, ...) |
+| `ENTITY_PREFIX` | `custom` | Fallback prefix for extra entities beyond the 20 built-in catalog names |
 | `GENERATION_INTERVAL` | `60` | Seconds between data points in continuous mode |
 | `HEC_BATCH_SIZE` | `1000` | Events per HEC batch |
 | `SEASONALITY_MODE` | `curve` | `curve` (sine wave peaking at noon) or `stdev` (Gaussian peaking at 18h) |
@@ -87,7 +87,7 @@ Each event sent to Splunk looks like:
     "time_human": "Fri Oct 14 10:30:03 2023",
     "dcount_hosts": 742,
     "events_count": 5123456,
-    "ref": "sample_001",
+    "ref": "security:linux_secure",
     "instance_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 }
 ```
@@ -98,8 +98,10 @@ Each event sent to Splunk looks like:
 | `time_human` | Human-readable timestamp |
 | `dcount_hosts` | Simulated distinct host count |
 | `events_count` | Simulated event volume |
-| `ref` | Entity identifier (e.g. `sample_001`) — use this as the entity key in TrackMe |
+| `ref` | Entity identifier (e.g. `security:linux_secure`) — use this as the entity key in TrackMe |
 | `instance_id` | UUID generated at container start — changes on every restart |
+
+Entity names are drawn from a built-in catalog of 20 realistic Splunk data sources (e.g. `network:pan:traffic`, `cloud:aws:cloudtrail`, `wineventlog:WinEventLog:System`). If you configure more entities than the catalog has, extras use the `ENTITY_PREFIX` fallback.
 
 ## Entity Behaviors
 
