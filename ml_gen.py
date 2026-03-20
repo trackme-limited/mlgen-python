@@ -595,17 +595,20 @@ def run_continuous(
     rng = random.Random()
 
     # Initialize anomaly cycling for outlier entities.
-    # Half start immediately in anomaly, half start in normal phase — this
-    # creates a staggered, realistic mix from the very first minute.
+    # ALL outlier entities start immediately in anomaly right after backfill
+    # so the effect is visible within minutes. After their first anomaly
+    # window expires, each entity cycles independently (anomaly → normal → anomaly...).
     now = datetime.now(timezone.utc)
     logger.info("Initializing anomaly cycling for outlier entities...")
-    outlier_entities = [e for e in entities if e.is_outlier()]
-    rng.shuffle(outlier_entities)
-    half = max(1, len(outlier_entities) // 2)
-    for i, entity in enumerate(outlier_entities):
-        start_in_anomaly = i < half
-        entity.maybe_transition(now, rng, logger, anomaly_durations, normal_durations,
-                                start_in_anomaly=start_in_anomaly)
+    for entity in entities:
+        if entity.is_outlier():
+            duration_hours = rng.choice(anomaly_durations)
+            entity.is_in_anomaly = True
+            entity.phase_end_time = now + timedelta(hours=duration_hours)
+            logger.info(
+                "  Entity %s: starting %s anomaly NOW — will last %dh",
+                entity.ref, entity.behavior, duration_hours,
+            )
 
     logger.info("Starting continuous generation (interval=%ds)...", interval)
     cycle = 0
@@ -633,13 +636,22 @@ def run_continuous(
             time_tag = f"{day_names[now.weekday()]} {now.hour:02d}:{now.minute:02d} UTC"
 
             # Show current state of outlier entities
-            anomaly_active = [e.ref for e in entities if e.is_in_anomaly]
-            anomaly_str = ", ".join(anomaly_active) if anomaly_active else "none"
+            anomaly_details = []
+            for e in entities:
+                if e.is_outlier():
+                    state = "ANOMALY" if e.is_in_anomaly else "normal"
+                    remaining = ""
+                    if e.phase_end_time:
+                        delta = e.phase_end_time - now
+                        remaining = f" ({delta.total_seconds()/3600:.1f}h left)"
+                    anomaly_details.append(f"{e.ref}={state}{remaining}")
 
             logger.info(
-                "Cycle %d [%s]: %d entities | sent: %d | failed: %d | anomalies active: %s",
-                cycle, time_tag, len(entities), hec.total_sent, hec.total_failed, anomaly_str,
+                "Cycle %d [%s]: %d entities | sent: %d | failed: %d",
+                cycle, time_tag, len(entities), hec.total_sent, hec.total_failed,
             )
+            for detail in anomaly_details:
+                logger.info("  Outlier: %s", detail)
 
         # Sleep remainder of interval
         elapsed = time.time() - cycle_start
