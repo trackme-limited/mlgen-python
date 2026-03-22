@@ -64,12 +64,14 @@ All settings are controlled via the `.env` file (copy from `.env.example`):
 | `SSL_VERIFY` | `false` | Verify SSL certificates |
 | `BACKFILL_DAYS` | `90` | Days of historical data to backfill on startup |
 | `BACKFILL_INTERVAL` | `60` | Seconds between data points during backfill |
-| `NUM_NORMAL` | `5` | Number of entities generating normal (baseline) data |
-| `NUM_LOWER_OUTLIER` | `1` | Number of entities generating lower-bound outliers |
-| `NUM_UPPER_OUTLIER` | `1` | Number of entities generating upper-bound outliers |
+| `NUM_NORMAL` | `5` | Seasonal entities generating normal (baseline) data |
+| `NUM_LOWER_OUTLIER` | `1` | Seasonal entities generating lower-bound outliers |
+| `NUM_UPPER_OUTLIER` | `1` | Seasonal entities generating upper-bound outliers |
+| `NUM_FLAT_NORMAL` | `1` | Flat entities (no seasonality) generating normal data |
+| `NUM_FLAT_LOWER_OUTLIER` | `1` | Flat entities (no seasonality) generating lower-bound outliers |
 | `VARIATION_PCT` | `75` | Variation percentage for outlier entities (e.g. 75 = +/-75%) |
-| `ANOMALY_DURATIONS` | `4,8,12,24` | Comma-separated hours — how long each anomaly lasts (random pick) |
-| `NORMAL_DURATIONS` | `12,24,48,72` | Comma-separated hours — how long normal lasts between anomalies (random pick) |
+| `ANOMALY_DURATIONS` | `12,24,48` | Comma-separated hours — how long each anomaly lasts (random pick) |
+| `NORMAL_DURATIONS` | `48,72,96,168` | Comma-separated hours — how long normal lasts between anomalies (random pick) |
 | `ENTITY_PREFIX` | `custom` | Fallback prefix for extra entities beyond the 20 built-in catalog names |
 | `GENERATION_INTERVAL` | `60` | Seconds between data points in continuous mode |
 | `HEC_BATCH_SIZE` | `1000` | Events per HEC batch |
@@ -105,9 +107,18 @@ Entity names are drawn from a built-in catalog of 20 realistic Splunk data sourc
 
 ## Entity Behaviors
 
+### Seasonal entities (with day/hour patterns)
+
 - **Normal** (`NUM_NORMAL`): generates baseline data with realistic day-of-week and hour-of-day seasonality. These entities always produce clean data.
 - **Lower outlier** (`NUM_LOWER_OUTLIER`): simulates data drops, resource depletion, or feed failures (metrics reduced by `VARIATION_PCT`%).
 - **Upper outlier** (`NUM_UPPER_OUTLIER`): simulates data surges, log storms, or duplicate ingestion (metrics increased by `VARIATION_PCT`%).
+
+### Flat entities (no seasonality)
+
+- **Normal** (`NUM_FLAT_NORMAL`): steady, near-constant volumes — like IT ops metrics collection (collectd, telegraf, SNMP, perfmon). No day-of-week or hour-of-day variation, just small natural fluctuations.
+- **Lower outlier** (`NUM_FLAT_LOWER_OUTLIER`): same flat profile but generates anomalously low values — simulates loss of metrics collectors, network transport failures, or systems going offline.
+
+Flat entities are useful for demonstrating ML outlier detection on KPIs where seasonality-based models (with `time_factor`) should be set to `none`, since the data doesn't follow time-of-day patterns.
 
 Each entity gets a unique baseline range and scale factor, so they look distinct in Splunk dashboards.
 
@@ -116,8 +127,8 @@ Each entity gets a unique baseline range and scale factor, so they look distinct
 Outlier entities don't generate anomalies permanently — they automatically cycle between **anomaly** and **normal** phases to simulate realistic incident lifecycles:
 
 1. After backfill completes, outlier entities start in a short **normal phase** (2-8h random)
-2. Then they enter an **anomaly phase** for a random duration picked from `ANOMALY_DURATIONS` (default: 4, 8, 12, or 24 hours)
-3. The anomaly resolves and they return to **normal** for a duration from `NORMAL_DURATIONS` (default: 12, 24, 48, or 72 hours)
+2. Then they enter an **anomaly phase** for a random duration picked from `ANOMALY_DURATIONS` (default: 12, 24, or 48 hours)
+3. The anomaly resolves and they return to **normal** for a duration from `NORMAL_DURATIONS` (default: 48, 72, 96, or 168 hours)
 4. The cycle repeats indefinitely
 
 This reproduces real-world scenarios where issues occur, get addressed, the entity comes back to a healthy state, and eventually another incident happens. The periodic logging shows which entities currently have active anomalies.
