@@ -51,10 +51,13 @@ def load_config() -> dict:
         "sourcetype": os.environ.get("SPLUNK_SOURCETYPE", "_json"),
         # Backfill settings
         "backfill_days": int(os.environ.get("BACKFILL_DAYS", "90")),
-        # Entity counts by behavior
+        # Entity counts by behavior (seasonal — follow day/hour patterns)
         "num_normal": int(os.environ.get("NUM_NORMAL", "5")),
         "num_lower_outlier": int(os.environ.get("NUM_LOWER_OUTLIER", "1")),
         "num_upper_outlier": int(os.environ.get("NUM_UPPER_OUTLIER", "1")),
+        # Flat entities (no seasonality — steady IT ops / metrics collection)
+        "num_flat_normal": int(os.environ.get("NUM_FLAT_NORMAL", "1")),
+        "num_flat_lower_outlier": int(os.environ.get("NUM_FLAT_LOWER_OUTLIER", "1")),
         # Outlier variation percentage (applied as +/- to baseline)
         "variation_pct": int(os.environ.get("VARIATION_PCT", "75")),
         # Anomaly cycling: comma-separated hours for anomaly and normal durations
@@ -140,6 +143,21 @@ ENTITY_CATALOG = [
     {"ref": "email:exchange:messagetracking", "dcount_hosts": (40, 80), "events_count": (1_000_000, 1_500_000)},
 ]
 
+# Flat entities — IT ops / metrics collection with no seasonality.
+# These represent infrastructure monitoring feeds that produce steady,
+# near-constant volumes regardless of time of day or day of week.
+# Narrow ranges = small natural variations (±5-10%).
+FLAT_ENTITY_CATALOG = [
+    {"ref": "metrics:collectd", "dcount_hosts": (480, 520), "events_count": (2_900_000, 3_100_000)},
+    {"ref": "metrics:telegraf", "dcount_hosts": (380, 420), "events_count": (2_400_000, 2_600_000)},
+    {"ref": "metrics:statsd", "dcount_hosts": (190, 210), "events_count": (1_400_000, 1_600_000)},
+    {"ref": "metrics:prometheus:node_exporter", "dcount_hosts": (570, 630), "events_count": (3_800_000, 4_200_000)},
+    {"ref": "metrics:splunk:otel:collector", "dcount_hosts": (290, 310), "events_count": (1_900_000, 2_100_000)},
+    {"ref": "itops:snmp:traps", "dcount_hosts": (140, 160), "events_count": (900_000, 1_100_000)},
+    {"ref": "itops:nmon:performance", "dcount_hosts": (95, 105), "events_count": (600_000, 700_000)},
+    {"ref": "itops:perfmon:metrics", "dcount_hosts": (240, 260), "events_count": (1_500_000, 1_700_000)},
+]
+
 # Day-of-week multipliers (relative to Monday baseline)
 DAY_MULTIPLIERS = {
     "Monday": 1.0,
@@ -162,11 +180,13 @@ DEFAULT_NORMAL_DURATIONS = [48, 72, 96, 168]     # How long normal lasts between
 class EntityProfile:
     """Represents a single entity with its own baseline and behavior."""
 
-    def __init__(self, ref: str, behavior: str, baseline: dict, scale_factor: float):
+    def __init__(self, ref: str, behavior: str, baseline: dict, scale_factor: float,
+                 flat: bool = False):
         self.ref = ref
         self.behavior = behavior  # "normal", "lower_outlier", "upper_outlier"
         self.baseline = baseline  # {"dcount_hosts": (lo, hi), "events_count": (lo, hi)}
         self.scale_factor = scale_factor  # Unique per-entity multiplier (0.8 - 1.2)
+        self.flat = flat  # True = no seasonality (IT ops / metrics collection)
 
         # Anomaly cycling state (only used for outlier entities in continuous mode)
         self.is_in_anomaly = False
@@ -242,43 +262,59 @@ class EntityProfile:
 def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfile]:
     """Build entity profiles with assigned behaviors.
 
-    Entities are picked from ENTITY_CATALOG to get realistic names that look
-    like real Splunk index:sourcetype combinations. If more entities are needed
-    than available in the catalog, extras are generated with a prefix.
+    Entities are picked from ENTITY_CATALOG (seasonal) or FLAT_ENTITY_CATALOG
+    (no seasonality). If more entities are needed than available in a catalog,
+    extras are generated with a prefix.
     """
-    total_needed = config["num_normal"] + config["num_lower_outlier"] + config["num_upper_outlier"]
-
-    # Shuffle the catalog and pick entities
-    catalog = list(ENTITY_CATALOG)
-    rng.shuffle(catalog)
+    # Shuffle catalogs
+    seasonal_catalog = list(ENTITY_CATALOG)
+    rng.shuffle(seasonal_catalog)
+    flat_catalog = list(FLAT_ENTITY_CATALOG)
+    rng.shuffle(flat_catalog)
 
     profiles = []
-    entity_idx = 0
 
+    def pick_from_catalog(catalog, idx, flat_flag):
+        if idx < len(catalog):
+            entry = catalog[idx]
+            ref = entry["ref"]
+            baseline = {
+                "dcount_hosts": entry["dcount_hosts"],
+                "events_count": entry["events_count"],
+            }
+        else:
+            ref = f"{config['entity_prefix']}_{idx + 1:03d}"
+            baseline = rng.choice([
+                {"dcount_hosts": e["dcount_hosts"], "events_count": e["events_count"]}
+                for e in catalog
+            ])
+        scale_factor = rng.uniform(0.8, 1.2)
+        return EntityProfile(ref, "", baseline, scale_factor, flat=flat_flag)
+
+    # Seasonal entities (with day/hour patterns)
+    seasonal_idx = 0
     for behavior, count in [
         ("normal", config["num_normal"]),
         ("lower_outlier", config["num_lower_outlier"]),
         ("upper_outlier", config["num_upper_outlier"]),
     ]:
         for _ in range(count):
-            if entity_idx < len(catalog):
-                entry = catalog[entity_idx]
-                ref = entry["ref"]
-                baseline = {
-                    "dcount_hosts": entry["dcount_hosts"],
-                    "events_count": entry["events_count"],
-                }
-            else:
-                # Fallback for when we need more entities than the catalog has
-                ref = f"{config['entity_prefix']}_{entity_idx + 1:03d}"
-                baseline = rng.choice([
-                    {"dcount_hosts": e["dcount_hosts"], "events_count": e["events_count"]}
-                    for e in ENTITY_CATALOG
-                ])
+            profile = pick_from_catalog(seasonal_catalog, seasonal_idx, flat_flag=False)
+            profile.behavior = behavior
+            profiles.append(profile)
+            seasonal_idx += 1
 
-            scale_factor = rng.uniform(0.8, 1.2)
-            profiles.append(EntityProfile(ref, behavior, baseline, scale_factor))
-            entity_idx += 1
+    # Flat entities (no seasonality — IT ops / metrics collection)
+    flat_idx = 0
+    for behavior, count in [
+        ("normal", config["num_flat_normal"]),
+        ("lower_outlier", config["num_flat_lower_outlier"]),
+    ]:
+        for _ in range(count):
+            profile = pick_from_catalog(flat_catalog, flat_idx, flat_flag=True)
+            profile.behavior = behavior
+            profiles.append(profile)
+            flat_idx += 1
 
     return profiles
 
@@ -329,12 +365,14 @@ def generate_metric(
     events_lo = int(events_lo * entity.scale_factor)
     events_hi = int(events_hi * entity.scale_factor)
 
-    # Apply day-of-week seasonality
-    day_mult = DAY_MULTIPLIERS.get(weekday, 1.0)
-    dcount_lo = int(dcount_lo * day_mult)
-    dcount_hi = int(dcount_hi * day_mult)
-    events_lo = int(events_lo * day_mult)
-    events_hi = int(events_hi * day_mult)
+    # Apply seasonality (skipped for flat entities like IT ops metrics)
+    if not entity.flat:
+        # Day-of-week seasonality
+        day_mult = DAY_MULTIPLIERS.get(weekday, 1.0)
+        dcount_lo = int(dcount_lo * day_mult)
+        dcount_hi = int(dcount_hi * day_mult)
+        events_lo = int(events_lo * day_mult)
+        events_hi = int(events_hi * day_mult)
 
     # Apply variation based on current effective behavior
     # (outlier entities cycle between anomaly and normal phases)
@@ -352,12 +390,13 @@ def generate_metric(
         events_lo = int(events_lo * factor)
         events_hi = int(events_hi * factor)
 
-    # Apply hour-of-day multiplier
-    h_mult = hourly_multiplier(hour, mode=seasonality_mode)
-    dcount_lo = int(dcount_lo * h_mult)
-    dcount_hi = int(dcount_hi * h_mult)
-    events_lo = int(events_lo * h_mult)
-    events_hi = int(events_hi * h_mult)
+    # Apply hour-of-day multiplier (skipped for flat entities)
+    if not entity.flat:
+        h_mult = hourly_multiplier(hour, mode=seasonality_mode)
+        dcount_lo = int(dcount_lo * h_mult)
+        dcount_hi = int(dcount_hi * h_mult)
+        events_lo = int(events_lo * h_mult)
+        events_hi = int(events_hi * h_mult)
 
     # Ensure lo <= hi
     if dcount_lo > dcount_hi:
@@ -684,9 +723,11 @@ def main():
     entities = build_entity_profiles(config, rng)
 
     total_entities = len(entities)
-    normal_count = sum(1 for e in entities if e.behavior == "normal")
-    lower_count = sum(1 for e in entities if e.behavior == "lower_outlier")
-    upper_count = sum(1 for e in entities if e.behavior == "upper_outlier")
+    seasonal_normal = sum(1 for e in entities if e.behavior == "normal" and not e.flat)
+    seasonal_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and not e.flat)
+    seasonal_upper = sum(1 for e in entities if e.behavior == "upper_outlier" and not e.flat)
+    flat_normal = sum(1 for e in entities if e.behavior == "normal" and e.flat)
+    flat_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and e.flat)
 
     logger.info("=" * 70)
     logger.info("ML Gen — Synthetic Metrics Generator for TrackMe")
@@ -698,9 +739,13 @@ def main():
     logger.info("  Backfill days:      %d", config["backfill_days"])
     logger.info("  Seasonality:        %s", config["seasonality_mode"])
     logger.info("  Entities:           %d total", total_entities)
-    logger.info("    Normal:           %d", normal_count)
-    logger.info("    Lower outlier:    %d (variation: -%d%%)", lower_count, config["variation_pct"])
-    logger.info("    Upper outlier:    %d (variation: +%d%%)", upper_count, config["variation_pct"])
+    logger.info("  Seasonal entities:")
+    logger.info("    Normal:           %d", seasonal_normal)
+    logger.info("    Lower outlier:    %d (variation: -%d%%)", seasonal_lower, config["variation_pct"])
+    logger.info("    Upper outlier:    %d (variation: +%d%%)", seasonal_upper, config["variation_pct"])
+    logger.info("  Flat entities (no seasonality):")
+    logger.info("    Normal:           %d", flat_normal)
+    logger.info("    Lower outlier:    %d (variation: -%d%%)", flat_lower, config["variation_pct"])
     logger.info("  Generation interval: %ds", config["generation_interval"])
     logger.info("  HEC batch size:     %d", config["hec_batch_size"])
     logger.info("  Dry run:            %s", config["dry_run"])
@@ -709,9 +754,10 @@ def main():
 
     # Log entity details
     for entity in entities:
+        entity_type = "flat" if entity.flat else "seasonal"
         logger.info(
-            "  Entity: ref=%s  behavior=%-14s  scale=%.2f  baseline_hosts=%s  baseline_events=%s",
-            entity.ref, entity.behavior, entity.scale_factor,
+            "  Entity: ref=%s  behavior=%-14s  type=%-8s  scale=%.2f  baseline_hosts=%s  baseline_events=%s",
+            entity.ref, entity.behavior, entity_type, entity.scale_factor,
             entity.baseline["dcount_hosts"], entity.baseline["events_count"],
         )
 
