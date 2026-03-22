@@ -126,10 +126,22 @@ Each entity gets a unique baseline range and scale factor, so they look distinct
 
 Outlier entities don't generate anomalies permanently — they automatically cycle between **anomaly** and **normal** phases to simulate realistic incident lifecycles:
 
-1. After backfill completes, outlier entities start in a short **normal phase** (2-8h random)
-2. Then they enter an **anomaly phase** for a random duration picked from `ANOMALY_DURATIONS` (default: 12, 24, or 48 hours)
+1. After backfill completes, all outlier entities **start in anomaly immediately**
+2. The anomaly lasts for a random duration from `ANOMALY_DURATIONS` (default: 12, 24, or 48 hours)
 3. The anomaly resolves and they return to **normal** for a duration from `NORMAL_DURATIONS` (default: 48, 72, 96, or 168 hours)
 4. The cycle repeats indefinitely
+
+### Short-Cycle Entities (Daily Anomaly/Recovery)
+
+Three entities are configured with **short anomaly cycles** that repeat once per day, useful for live demos where you need to see anomaly/recovery within hours:
+
+| Entity | Anomaly Duration | Normal Duration | Behavior |
+|---|---|---|---|
+| `web:access_combined` | 2h | 22h | Lower outlier |
+| `cloud:mscs:azure:eventhub` | 1h | 23h | Lower outlier |
+| `endpoint:XmlWinEventLog:Microsoft-Windows-Sysmon/Operational` | 4h | 20h | Lower outlier |
+
+These entities start in anomaly immediately after backfill, and cycle daily (anomaly → normal → anomaly...). They are separate from the regular seasonal outlier entities, which have longer cycles.
 
 This reproduces real-world scenarios where issues occur, get addressed, the entity comes back to a healthy state, and eventually another incident happens. The periodic logging shows which entities currently have active anomalies.
 

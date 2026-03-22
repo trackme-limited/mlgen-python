@@ -176,17 +176,31 @@ DAY_MULTIPLIERS = {
 DEFAULT_ANOMALY_DURATIONS = [12, 24, 48]          # How long an anomaly lasts
 DEFAULT_NORMAL_DURATIONS = [48, 72, 96, 168]     # How long normal lasts between anomalies
 
+# Short-cycle anomaly entities — specific entities with short anomaly bursts
+# that repeat once per day (anomaly_hours + normal_hours ≈ 24h).
+# These are useful for live demos where you want to see anomaly/recovery cycles
+# within a single day. All start in anomaly immediately after backfill.
+SHORT_CYCLE_ENTITIES = [
+    {"ref": "web:access_combined", "anomaly_hours": 2, "behavior": "lower_outlier"},
+    {"ref": "cloud:mscs:azure:eventhub", "anomaly_hours": 1, "behavior": "lower_outlier"},
+    {"ref": "endpoint:XmlWinEventLog:Microsoft-Windows-Sysmon/Operational", "anomaly_hours": 4, "behavior": "lower_outlier"},
+]
+
 
 class EntityProfile:
     """Represents a single entity with its own baseline and behavior."""
 
     def __init__(self, ref: str, behavior: str, baseline: dict, scale_factor: float,
-                 flat: bool = False):
+                 flat: bool = False, short_cycle_hours: int | None = None):
         self.ref = ref
         self.behavior = behavior  # "normal", "lower_outlier", "upper_outlier"
         self.baseline = baseline  # {"dcount_hosts": (lo, hi), "events_count": (lo, hi)}
         self.scale_factor = scale_factor  # Unique per-entity multiplier (0.8 - 1.2)
         self.flat = flat  # True = no seasonality (IT ops / metrics collection)
+
+        # Short-cycle anomaly: fixed anomaly duration (hours), normal = 24 - anomaly
+        # When set, this entity uses its own durations instead of the global lists.
+        self.short_cycle_hours = short_cycle_hours
 
         # Anomaly cycling state (only used for outlier entities in continuous mode)
         self.is_in_anomaly = False
@@ -206,6 +220,18 @@ class EntityProfile:
             return "normal"
         return self.behavior if self.is_in_anomaly else "normal"
 
+    def _get_anomaly_duration(self, rng: random.Random, anomaly_durations: list[int]) -> int:
+        """Get anomaly duration in hours (short-cycle or from global list)."""
+        if self.short_cycle_hours is not None:
+            return self.short_cycle_hours
+        return rng.choice(anomaly_durations)
+
+    def _get_normal_duration(self, rng: random.Random, normal_durations: list[int]) -> int:
+        """Get normal duration in hours (short-cycle: 24-anomaly, or from global list)."""
+        if self.short_cycle_hours is not None:
+            return 24 - self.short_cycle_hours
+        return rng.choice(normal_durations)
+
     def maybe_transition(self, now: datetime, rng: random.Random, logger: logging.Logger,
                          anomaly_durations: list[int], normal_durations: list[int],
                          start_in_anomaly: bool = False):
@@ -213,25 +239,27 @@ class EntityProfile:
         if not self.is_outlier():
             return
 
+        cycle_tag = " [short-cycle]" if self.short_cycle_hours is not None else ""
+
         # First call — initialize the phase
         if self.phase_end_time is None:
             if start_in_anomaly:
                 # Start directly in anomaly phase (no waiting)
-                duration_hours = rng.choice(anomaly_durations)
+                duration_hours = self._get_anomaly_duration(rng, anomaly_durations)
                 self.is_in_anomaly = True
                 self.phase_end_time = now + timedelta(hours=duration_hours)
                 logger.info(
-                    "  Entity %s: starting immediately in %s anomaly for %dh",
-                    self.ref, self.behavior, duration_hours,
+                    "  Entity %s: starting immediately in %s anomaly for %dh%s",
+                    self.ref, self.behavior, duration_hours, cycle_tag,
                 )
             else:
                 # Start in normal phase, anomaly comes later
-                initial_hours = rng.choice(normal_durations)
+                initial_hours = self._get_normal_duration(rng, normal_durations)
                 self.phase_end_time = now + timedelta(hours=initial_hours)
                 self.is_in_anomaly = False
                 logger.info(
-                    "  Entity %s: starting in normal phase, first anomaly in %dh",
-                    self.ref, initial_hours,
+                    "  Entity %s: starting in normal phase, first anomaly in %dh%s",
+                    self.ref, initial_hours, cycle_tag,
                 )
             return
 
@@ -241,21 +269,21 @@ class EntityProfile:
         # Time to transition
         if self.is_in_anomaly:
             # Anomaly → Normal (issue was "fixed")
-            duration_hours = rng.choice(normal_durations)
+            duration_hours = self._get_normal_duration(rng, normal_durations)
             self.is_in_anomaly = False
             self.phase_end_time = now + timedelta(hours=duration_hours)
             logger.info(
-                "  Entity %s: anomaly resolved — back to normal for %dh",
-                self.ref, duration_hours,
+                "  Entity %s: anomaly resolved — back to normal for %dh%s",
+                self.ref, duration_hours, cycle_tag,
             )
         else:
             # Normal → Anomaly (new incident)
-            duration_hours = rng.choice(anomaly_durations)
+            duration_hours = self._get_anomaly_duration(rng, anomaly_durations)
             self.is_in_anomaly = True
             self.phase_end_time = now + timedelta(hours=duration_hours)
             logger.info(
-                "  Entity %s: new %s anomaly started — will last %dh",
-                self.ref, self.behavior, duration_hours,
+                "  Entity %s: new %s anomaly started — will last %dh%s",
+                self.ref, self.behavior, duration_hours, cycle_tag,
             )
 
 
@@ -263,17 +291,41 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
     """Build entity profiles with assigned behaviors.
 
     Entities are picked from ENTITY_CATALOG (seasonal) or FLAT_ENTITY_CATALOG
-    (no seasonality). If more entities are needed than available in a catalog,
-    extras are generated with a prefix.
+    (no seasonality). Short-cycle entities are matched by exact ref name and
+    removed from the seasonal pool to avoid duplicates. If more entities are
+    needed than available in a catalog, extras are generated with a prefix.
     """
-    # Shuffle catalogs
-    seasonal_catalog = list(ENTITY_CATALOG)
+    # Build short-cycle entity lookup (ref → config)
+    short_cycle_refs = {sc["ref"]: sc for sc in SHORT_CYCLE_ENTITIES}
+
+    # Separate short-cycle entries from the seasonal catalog
+    seasonal_catalog = [e for e in ENTITY_CATALOG if e["ref"] not in short_cycle_refs]
     rng.shuffle(seasonal_catalog)
     flat_catalog = list(FLAT_ENTITY_CATALOG)
     rng.shuffle(flat_catalog)
 
     profiles = []
 
+    # 1. Short-cycle entities (exact ref match, specific anomaly durations)
+    for sc in SHORT_CYCLE_ENTITIES:
+        # Find matching entry in the full catalog
+        entry = next((e for e in ENTITY_CATALOG if e["ref"] == sc["ref"]), None)
+        if entry is None:
+            continue
+        scale_factor = rng.uniform(0.8, 1.2)
+        profile = EntityProfile(
+            ref=entry["ref"],
+            behavior=sc["behavior"],
+            baseline={
+                "dcount_hosts": entry["dcount_hosts"],
+                "events_count": entry["events_count"],
+            },
+            scale_factor=scale_factor,
+            short_cycle_hours=sc["anomaly_hours"],
+        )
+        profiles.append(profile)
+
+    # 2. Seasonal entities (with day/hour patterns)
     def pick_from_catalog(catalog, idx, flat_flag):
         if idx < len(catalog):
             entry = catalog[idx]
@@ -291,7 +343,6 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
         scale_factor = rng.uniform(0.8, 1.2)
         return EntityProfile(ref, "", baseline, scale_factor, flat=flat_flag)
 
-    # Seasonal entities (with day/hour patterns)
     seasonal_idx = 0
     for behavior, count in [
         ("normal", config["num_normal"]),
@@ -304,7 +355,7 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
             profiles.append(profile)
             seasonal_idx += 1
 
-    # Flat entities (no seasonality — IT ops / metrics collection)
+    # 3. Flat entities (no seasonality — IT ops / metrics collection)
     flat_idx = 0
     for behavior, count in [
         ("normal", config["num_flat_normal"]),
@@ -641,12 +692,13 @@ def run_continuous(
     logger.info("Initializing anomaly cycling for outlier entities...")
     for entity in entities:
         if entity.is_outlier():
-            duration_hours = rng.choice(anomaly_durations)
+            duration_hours = entity._get_anomaly_duration(rng, anomaly_durations)
             entity.is_in_anomaly = True
             entity.phase_end_time = now + timedelta(hours=duration_hours)
+            cycle_tag = f" [short-cycle: {entity.short_cycle_hours}h anomaly / {24 - entity.short_cycle_hours}h normal]" if entity.short_cycle_hours is not None else ""
             logger.info(
-                "  Entity %s: starting %s anomaly NOW — will last %dh",
-                entity.ref, entity.behavior, duration_hours,
+                "  Entity %s: starting %s anomaly NOW — will last %dh%s",
+                entity.ref, entity.behavior, duration_hours, cycle_tag,
             )
 
     logger.info("Starting continuous generation (interval=%ds)...", interval)
@@ -683,7 +735,8 @@ def run_continuous(
                     if e.phase_end_time:
                         delta = e.phase_end_time - now
                         remaining = f" ({delta.total_seconds()/3600:.1f}h left)"
-                    anomaly_details.append(f"{e.ref}={state}{remaining}")
+                    cycle_tag = " [short-cycle]" if e.short_cycle_hours is not None else ""
+                    anomaly_details.append(f"{e.ref}={state}{remaining}{cycle_tag}")
 
             logger.info(
                 "Cycle %d [%s]: %d entities | sent: %d | failed: %d",
@@ -723,9 +776,10 @@ def main():
     entities = build_entity_profiles(config, rng)
 
     total_entities = len(entities)
-    seasonal_normal = sum(1 for e in entities if e.behavior == "normal" and not e.flat)
-    seasonal_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and not e.flat)
-    seasonal_upper = sum(1 for e in entities if e.behavior == "upper_outlier" and not e.flat)
+    short_cycle_count = sum(1 for e in entities if e.short_cycle_hours is not None)
+    seasonal_normal = sum(1 for e in entities if e.behavior == "normal" and not e.flat and e.short_cycle_hours is None)
+    seasonal_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and not e.flat and e.short_cycle_hours is None)
+    seasonal_upper = sum(1 for e in entities if e.behavior == "upper_outlier" and not e.flat and e.short_cycle_hours is None)
     flat_normal = sum(1 for e in entities if e.behavior == "normal" and e.flat)
     flat_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and e.flat)
 
@@ -743,6 +797,12 @@ def main():
     logger.info("    Normal:           %d", seasonal_normal)
     logger.info("    Lower outlier:    %d (variation: -%d%%)", seasonal_lower, config["variation_pct"])
     logger.info("    Upper outlier:    %d (variation: +%d%%)", seasonal_upper, config["variation_pct"])
+    logger.info("  Short-cycle entities (daily anomaly/recovery):")
+    logger.info("    Count:            %d", short_cycle_count)
+    for e in entities:
+        if e.short_cycle_hours is not None:
+            logger.info("    %s: %dh anomaly / %dh normal (%s)",
+                        e.ref, e.short_cycle_hours, 24 - e.short_cycle_hours, e.behavior)
     logger.info("  Flat entities (no seasonality):")
     logger.info("    Normal:           %d", flat_normal)
     logger.info("    Lower outlier:    %d (variation: -%d%%)", flat_lower, config["variation_pct"])
@@ -754,9 +814,14 @@ def main():
 
     # Log entity details
     for entity in entities:
-        entity_type = "flat" if entity.flat else "seasonal"
+        if entity.short_cycle_hours is not None:
+            entity_type = f"short-cycle({entity.short_cycle_hours}h)"
+        elif entity.flat:
+            entity_type = "flat"
+        else:
+            entity_type = "seasonal"
         logger.info(
-            "  Entity: ref=%s  behavior=%-14s  type=%-8s  scale=%.2f  baseline_hosts=%s  baseline_events=%s",
+            "  Entity: ref=%s  behavior=%-14s  type=%-16s  scale=%.2f  baseline_hosts=%s  baseline_events=%s",
             entity.ref, entity.behavior, entity_type, entity.scale_factor,
             entity.baseline["dcount_hosts"], entity.baseline["events_count"],
         )
