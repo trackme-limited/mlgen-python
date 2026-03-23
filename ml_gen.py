@@ -32,10 +32,17 @@ __author__ = "TrackMe Limited"
 __copyright__ = "Copyright 2026, TrackMe Limited, U.K."
 __credits__ = ["Guilhem Marchand"]
 __license__ = "TrackMe Limited, all rights reserved"
-__version__ = "2.0.0"
 __maintainer__ = "TrackMe Limited, U.K."
 __email__ = "support@trackme-solutions.com"
 __status__ = "PRODUCTION"
+
+# Load version from version.json
+_version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
+try:
+    with open(_version_file) as _vf:
+        __version__ = json.load(_vf).get("version", "0.0.0")
+except (FileNotFoundError, json.JSONDecodeError):
+    __version__ = "0.0.0"
 
 # ---------------------------------------------------------------------------
 # Configuration from environment
@@ -79,6 +86,10 @@ def load_config() -> dict:
         "log_level": os.environ.get("LOG_LEVEL", "INFO").upper(),
         "ssl_verify": os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes"),
         "dry_run": os.environ.get("DRY_RUN", "false").lower() in ("true", "1", "yes"),
+        # Instance ID: if set, use this value; if empty, generate a new UUID per run
+        "instance_id": os.environ.get("INSTANCE_ID", "").strip(),
+        # Disable all anomalies: override all outlier behaviors to normal
+        "disable_all_anomalies": os.environ.get("DISABLE_ALL_ANOMALIES", "0") in ("1", "true", "yes"),
     }
 
     if not config["hec_token"] and not config["dry_run"]:
@@ -764,8 +775,13 @@ def main():
     setup_logging(config["log_level"])
     logger = logging.getLogger("ml_gen")
 
-    # Generate a unique instance_id for this container run
-    instance_id = str(uuid.uuid4())
+    # Instance ID: use configured value or generate a new UUID per run
+    if config["instance_id"]:
+        instance_id = config["instance_id"]
+        logger.info("Using configured INSTANCE_ID: %s", instance_id)
+    else:
+        instance_id = str(uuid.uuid4())
+        logger.info("Generated new instance_id: %s", instance_id)
 
     # Register signal handlers
     signal.signal(signal.SIGTERM, signal_handler)
@@ -774,6 +790,13 @@ def main():
     # Build entity profiles
     rng = random.Random(42)
     entities = build_entity_profiles(config, rng)
+
+    # DISABLE_ALL_ANOMALIES: override all outlier behaviors to normal
+    if config["disable_all_anomalies"]:
+        logger.info("DISABLE_ALL_ANOMALIES=1 — all entities forced to normal behavior")
+        for entity in entities:
+            entity.behavior = "normal"
+            entity.short_cycle_hours = None
 
     total_entities = len(entities)
     short_cycle_count = sum(1 for e in entities if e.short_cycle_hours is not None)
@@ -784,9 +807,11 @@ def main():
     flat_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and e.flat)
 
     logger.info("=" * 70)
-    logger.info("ML Gen — Synthetic Metrics Generator for TrackMe")
+    logger.info("ML Gen v%s — Synthetic Metrics Generator for TrackMe", __version__)
     logger.info("=" * 70)
-    logger.info("  Instance ID:        %s", instance_id)
+    logger.info("  Instance ID:        %s%s", instance_id,
+                " (configured)" if config["instance_id"] else " (auto-generated)")
+    logger.info("  Disable anomalies:  %s", config["disable_all_anomalies"])
     logger.info("  HEC URL:            %s", config["hec_url"])
     logger.info("  Index:              %s", config["index"])
     logger.info("  Sourcetype:         %s", config["sourcetype"])
