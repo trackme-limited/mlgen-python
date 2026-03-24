@@ -863,8 +863,12 @@ def main():
     )
 
     # Phase 1: Backfill historical data (all entities use normal behavior)
-    run_backfill(config, entities, instance_id, hec, logger)
-    logger.info("Backfill complete. Transitioning to continuous generation...")
+    # Skip backfill when using a configured instance_id — the data already exists in Splunk.
+    if config["instance_id"]:
+        logger.info("Skipping backfill — using configured INSTANCE_ID (historical data already exists)")
+    else:
+        run_backfill(config, entities, instance_id, hec, logger)
+        logger.info("Backfill complete. Transitioning to continuous generation...")
 
     # Phase 2: Continuous generation (entities follow their assigned behaviors)
     run_continuous(config, entities, instance_id, hec, logger)
