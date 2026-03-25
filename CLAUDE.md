@@ -44,6 +44,7 @@ Container starts
       3. build_entity_profiles() — creates entity list from catalogs
       4. DISABLE_ALL_ANOMALIES check — overrides all behaviors to normal if set
       5. run_backfill() — generates BACKFILL_DAYS of historical data (all normal)
+         ↳ SKIPPED if INSTANCE_ID is set (data already exists in Splunk)
       6. run_continuous() — infinite loop generating real-time data with anomaly cycling
 ```
 
@@ -170,9 +171,13 @@ When `DISABLE_ALL_ANOMALIES=1`:
 
 ### INSTANCE_ID
 
-- If `INSTANCE_ID` env var is set and non-empty: that value is used for all events
-- If empty (default): `uuid.uuid4()` generates a new UUID per container run
+- If `INSTANCE_ID` env var is set and non-empty: that value is used for all events, and **backfill is skipped** (historical data already exists in Splunk from the previous run)
+- If empty (default): `uuid.uuid4()` generates a new UUID per container run, and a full backfill is performed
 - The instance_id appears in every event and is used in TrackMe Flex Objects to create unique entities per container run
+
+### Applying `.env` changes
+
+`docker compose restart` reuses the existing container and **does not pick up `.env` changes**. Always use `docker compose up -d` to apply configuration changes (recreates the container). Only rebuild (`docker compose build --no-cache`) when the code itself has changed.
 
 ## Event Format
 

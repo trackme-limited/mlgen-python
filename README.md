@@ -79,10 +79,10 @@ docker compose build --no-cache && docker compose up -d
 
 The generator is fully automated — no mode switching needed:
 
-1. **Backfill phase**: generates `BACKFILL_DAYS` (default: 90) of historical data for all entities using **normal behavior** (clean baseline for ML model training)
+1. **Backfill phase**: generates `BACKFILL_DAYS` (default: 90) of historical data for all entities using **normal behavior** (clean baseline for ML model training). **Skipped** when `INSTANCE_ID` is set (data already exists in Splunk).
 2. **Continuous phase**: automatically transitions to real-time generation where each entity follows its assigned behavior — normal entities stay normal, outlier entities immediately start producing anomalies with automatic cycling
 
-To start fresh, just restart the container — you get a new `instance_id` and a clean backfill (unless `INSTANCE_ID` is set to a fixed value).
+To start fresh, remove `INSTANCE_ID` from `.env` and run `docker compose up -d` — you get a new auto-generated `instance_id` and a clean backfill.
 
 ## Configuration
 
