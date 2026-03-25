@@ -65,6 +65,8 @@ def load_config() -> dict:
         # Flat entities (no seasonality — steady IT ops / metrics collection)
         "num_flat_normal": int(os.environ.get("NUM_FLAT_NORMAL", "1")),
         "num_flat_lower_outlier": int(os.environ.get("NUM_FLAT_LOWER_OUTLIER", "1")),
+        # Behavior-change entities (progressive ramp-up then baseline shift)
+        "num_behavior_change": int(os.environ.get("NUM_BEHAVIOR_CHANGE", "1")),
         # Outlier variation percentage (applied as +/- to baseline)
         "variation_pct": int(os.environ.get("VARIATION_PCT", "75")),
         # Anomaly cycling: comma-separated hours for anomaly and normal durations
@@ -197,17 +199,45 @@ SHORT_CYCLE_ENTITIES = [
     {"ref": "endpoint:XmlWinEventLog:Microsoft-Windows-Sysmon/Operational", "anomaly_hours": 4, "behavior": "lower_outlier"},
 ]
 
+# Behavior-change entities — simulate progressive data onboarding followed by
+# a baseline shift. The ML model trains on the full history (including the ramp)
+# and then flags the recent elevated volume as anomalous, demonstrating the need
+# for model retraining / adaptation.
+#
+# Timeline (relative to BACKFILL_DAYS):
+#   Phase 1 — Ramp-up:  days 1 to (BACKFILL_DAYS - change_days)
+#                        Volume grows linearly from ramp_start_pct% to 100%
+#   Phase 2 — Shift:    last change_days of backfill + all of continuous mode
+#                        Volume stays at shift_pct% of baseline (e.g., 130% = +30%)
+#
+BEHAVIOR_CHANGE_CATALOG = [
+    {
+        "ref": "cloud:gcp:pubsub:audit",
+        "dcount_hosts": (80, 120),
+        "events_count": (1_800_000, 2_200_000),
+        "ramp_start_pct": 30,    # Start at 30% of baseline
+        "change_days": 30,       # Last 30 days at elevated volume
+        "shift_pct": 130,        # 130% = +30% increase after change
+    },
+]
+
 
 class EntityProfile:
     """Represents a single entity with its own baseline and behavior."""
 
     def __init__(self, ref: str, behavior: str, baseline: dict, scale_factor: float,
-                 flat: bool = False, short_cycle_hours: int | None = None):
+                 flat: bool = False, short_cycle_hours: int | None = None,
+                 behavior_change: dict | None = None):
         self.ref = ref
         self.behavior = behavior  # "normal", "lower_outlier", "upper_outlier"
         self.baseline = baseline  # {"dcount_hosts": (lo, hi), "events_count": (lo, hi)}
         self.scale_factor = scale_factor  # Unique per-entity multiplier (0.8 - 1.2)
         self.flat = flat  # True = no seasonality (IT ops / metrics collection)
+
+        # Behavior change: progressive ramp-up then baseline shift.
+        # Dict with keys: ramp_start_pct, change_days, shift_pct, backfill_start
+        # Set by main() after backfill timeline is known.
+        self.behavior_change = behavior_change
 
         # Short-cycle anomaly: fixed anomaly duration (hours), normal = 24 - anomaly
         # When set, this entity uses its own durations instead of the global lists.
@@ -378,6 +408,48 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
             profiles.append(profile)
             flat_idx += 1
 
+    # 4. Behavior-change entities (progressive ramp-up → baseline shift)
+    bc_catalog = list(BEHAVIOR_CHANGE_CATALOG)
+    for i in range(config["num_behavior_change"]):
+        if i < len(bc_catalog):
+            entry = bc_catalog[i]
+            ref = entry["ref"]
+            baseline = {
+                "dcount_hosts": entry["dcount_hosts"],
+                "events_count": entry["events_count"],
+            }
+            bc_config = {
+                "ramp_start_pct": entry["ramp_start_pct"],
+                "change_days": entry["change_days"],
+                "shift_pct": entry["shift_pct"],
+                # backfill_start and backfill_days are set later in main()
+                # once the backfill timeline is known
+                "backfill_start": None,
+                "backfill_days": None,
+            }
+        else:
+            ref = f"{config['entity_prefix']}_bc_{i + 1:03d}"
+            baseline = {
+                "dcount_hosts": (80, 120),
+                "events_count": (1_800_000, 2_200_000),
+            }
+            bc_config = {
+                "ramp_start_pct": 30,
+                "change_days": 30,
+                "shift_pct": 130,
+                "backfill_start": None,
+                "backfill_days": None,
+            }
+        scale_factor = rng.uniform(0.8, 1.2)
+        profile = EntityProfile(
+            ref=ref,
+            behavior="normal",
+            baseline=baseline,
+            scale_factor=scale_factor,
+            behavior_change=bc_config,
+        )
+        profiles.append(profile)
+
     return profiles
 
 
@@ -426,6 +498,35 @@ def generate_metric(
     dcount_hi = int(dcount_hi * entity.scale_factor)
     events_lo = int(events_lo * entity.scale_factor)
     events_hi = int(events_hi * entity.scale_factor)
+
+    # Apply behavior-change time-dependent multiplier
+    # Simulates progressive data onboarding → baseline shift
+    if entity.behavior_change is not None:
+        bc = entity.behavior_change
+        backfill_start = bc["backfill_start"]
+        backfill_days = bc["backfill_days"]
+        change_days = bc["change_days"]
+        ramp_start_pct = bc["ramp_start_pct"]
+        shift_pct = bc["shift_pct"]
+
+        days_elapsed = (dt - backfill_start).total_seconds() / 86400.0
+        ramp_end_day = backfill_days - change_days  # Day when ramp ends and shift begins
+
+        if days_elapsed < 0:
+            # Before backfill start (shouldn't happen)
+            bc_mult = ramp_start_pct / 100.0
+        elif days_elapsed < ramp_end_day:
+            # Phase 1: Ramp-up — linear interpolation from ramp_start_pct to 100%
+            progress = days_elapsed / ramp_end_day
+            bc_mult = (ramp_start_pct + progress * (100 - ramp_start_pct)) / 100.0
+        else:
+            # Phase 2: Shift — elevated baseline
+            bc_mult = shift_pct / 100.0
+
+        dcount_lo = int(dcount_lo * bc_mult)
+        dcount_hi = int(dcount_hi * bc_mult)
+        events_lo = int(events_lo * bc_mult)
+        events_hi = int(events_hi * bc_mult)
 
     # Apply seasonality (skipped for flat entities like IT ops metrics)
     if not entity.flat:
@@ -820,6 +921,13 @@ def main():
     rng = random.Random(42)
     entities = build_entity_profiles(config, rng)
 
+    # Set behavior-change timeline now that we know backfill_days
+    backfill_start = datetime.now(timezone.utc) - timedelta(days=config["backfill_days"])
+    for entity in entities:
+        if entity.behavior_change is not None:
+            entity.behavior_change["backfill_start"] = backfill_start
+            entity.behavior_change["backfill_days"] = config["backfill_days"]
+
     # DISABLE_ALL_ANOMALIES: override all outlier behaviors to normal
     if config["disable_all_anomalies"]:
         logger.info("DISABLE_ALL_ANOMALIES=1 — all entities forced to normal behavior")
@@ -829,7 +937,8 @@ def main():
 
     total_entities = len(entities)
     short_cycle_count = sum(1 for e in entities if e.short_cycle_hours is not None)
-    seasonal_normal = sum(1 for e in entities if e.behavior == "normal" and not e.flat and e.short_cycle_hours is None)
+    bc_count = sum(1 for e in entities if e.behavior_change is not None)
+    seasonal_normal = sum(1 for e in entities if e.behavior == "normal" and not e.flat and e.short_cycle_hours is None and e.behavior_change is None)
     seasonal_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and not e.flat and e.short_cycle_hours is None)
     seasonal_upper = sum(1 for e in entities if e.behavior == "upper_outlier" and not e.flat and e.short_cycle_hours is None)
     flat_normal = sum(1 for e in entities if e.behavior == "normal" and e.flat)
@@ -860,6 +969,15 @@ def main():
     logger.info("  Flat entities (no seasonality):")
     logger.info("    Normal:           %d", flat_normal)
     logger.info("    Lower outlier:    %d (variation: -%d%%)", flat_lower, config["variation_pct"])
+    logger.info("  Behavior-change entities (ramp-up → baseline shift):")
+    logger.info("    Count:            %d", bc_count)
+    for e in entities:
+        if e.behavior_change is not None:
+            bc = e.behavior_change
+            logger.info("    %s: ramp %d%%→100%% over %dd, then shift to %d%%",
+                        e.ref, bc["ramp_start_pct"],
+                        bc["backfill_days"] - bc["change_days"],
+                        bc["shift_pct"])
     logger.info("  Generation interval: %ds", config["generation_interval"])
     logger.info("  HEC batch size:     %d", config["hec_batch_size"])
     logger.info("  Dry run:            %s", config["dry_run"])
@@ -868,7 +986,9 @@ def main():
 
     # Log entity details
     for entity in entities:
-        if entity.short_cycle_hours is not None:
+        if entity.behavior_change is not None:
+            entity_type = "behavior-change"
+        elif entity.short_cycle_hours is not None:
             entity_type = f"short-cycle({entity.short_cycle_hours}h)"
         elif entity.flat:
             entity_type = "flat"
