@@ -655,6 +655,7 @@ def run_backfill(
         "Backfill complete: %d events sent, %d failed",
         hec.total_sent, hec.total_failed,
     )
+    return end_time  # Return the target end time so continuous mode can fill the gap
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +679,7 @@ def run_continuous(
     instance_id: str,
     hec: HECSender,
     logger: logging.Logger,
+    backfill_end_time: datetime | None = None,
 ):
     """Generate metrics continuously at the configured interval.
 
@@ -711,6 +713,33 @@ def run_continuous(
                 "  Entity %s: starting %s anomaly NOW — will last %dh%s",
                 entity.ref, entity.behavior, duration_hours, cycle_tag,
             )
+
+    # Fill the gap between backfill end and now.
+    # Backfill records data up to the time it *started*, but by the time it
+    # finishes (10-30 min for large datasets), there's a gap.  Fill it before
+    # entering the real-time loop so metrics are continuous.
+    if backfill_end_time is not None:
+        gap_start = backfill_end_time + timedelta(seconds=interval)
+        now = datetime.now(timezone.utc)
+        if gap_start < now:
+            gap_seconds = (now - gap_start).total_seconds()
+            gap_points = int(gap_seconds / interval)
+            if gap_points > 0:
+                logger.info(
+                    "Filling post-backfill gap: %.0fs (%d data points per entity)",
+                    gap_seconds, gap_points,
+                )
+                current_time = gap_start
+                while current_time <= now:
+                    for entity in entities:
+                        metric = generate_metric(
+                            current_time, entity, variation_pct, instance_id,
+                            seasonality_mode, rng,
+                        )
+                        hec.enqueue(metric)
+                    current_time += timedelta(seconds=interval)
+                hec.flush()
+                logger.info("Gap filled — metrics are continuous")
 
     logger.info("Starting continuous generation (interval=%ds)...", interval)
     cycle = 0
@@ -864,14 +893,15 @@ def main():
 
     # Phase 1: Backfill historical data (all entities use normal behavior)
     # Skip backfill when using a configured instance_id — the data already exists in Splunk.
+    backfill_end_time = None
     if config["instance_id"]:
         logger.info("Skipping backfill — using configured INSTANCE_ID (historical data already exists)")
     else:
-        run_backfill(config, entities, instance_id, hec, logger)
+        backfill_end_time = run_backfill(config, entities, instance_id, hec, logger)
         logger.info("Backfill complete. Transitioning to continuous generation...")
 
     # Phase 2: Continuous generation (entities follow their assigned behaviors)
-    run_continuous(config, entities, instance_id, hec, logger)
+    run_continuous(config, entities, instance_id, hec, logger, backfill_end_time)
 
     # Final flush
     hec.flush()
