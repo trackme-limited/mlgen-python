@@ -153,6 +153,15 @@ All outlier entities start in anomaly immediately after backfill with `is_in_ano
 - Uses deterministic RNG (seed=42) for reproducible historical data
 - Progress logged every 10k events
 
+### Post-Backfill Gap Fill
+
+Backfill targets data up to the moment it *starts*, but can take 10-30 minutes to complete (90 days × 12 entities × 60s intervals ≈ 1.5M events). This would leave a gap in the metrics timeline. `run_continuous()` accepts `backfill_end_time` and fills the gap before entering the real-time loop:
+
+1. `run_backfill()` returns `end_time` (the timestamp it was targeting)
+2. `run_continuous()` calculates gap = `now - backfill_end_time`
+3. If gap > 0, it generates data points to fill it (using real entity behaviors, including anomaly variation)
+4. Then enters the normal real-time loop
+
 ### Continuous Generation (`run_continuous()`)
 
 - Infinite loop at `GENERATION_INTERVAL` spacing
