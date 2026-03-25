@@ -9,6 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ml_gen.py .
+COPY version.json .
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
