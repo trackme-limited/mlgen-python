@@ -38,17 +38,44 @@ docker compose up -d --build
 # View logs
 docker compose logs -f
 
-# Restart (generates a new instance_id for fresh tracking, unless INSTANCE_ID is set)
-docker compose restart
-
-# Rebuild after code changes (bypass Docker cache)
-docker compose build --no-cache && docker compose up -d
-
 # Stop
 docker compose down
 ```
 
-### 3. What happens on startup
+### 3. Applying `.env` changes
+
+The `.env` file is read at **container creation** time, not at build time. After editing `.env`:
+
+```bash
+# Recreate the container with the updated .env (no rebuild needed)
+docker compose up -d
+```
+
+> **Important**: `docker compose restart` reuses the existing container and **will not pick up `.env` changes**. Always use `docker compose up -d` to apply configuration changes.
+
+Only rebuild (`docker compose build --no-cache`) when the **code** itself has changed (`ml_gen.py`, `Dockerfile`, `entrypoint.sh`).
+
+### 4. Common workflows
+
+```bash
+# Start fresh: new auto-generated instance_id + full backfill
+docker compose up -d
+
+# Pin an instance_id after a run (edit .env, set INSTANCE_ID=<value>)
+# Then recreate — skips backfill, reuses existing Splunk data
+docker compose up -d
+
+# Disable all anomalies mid-run (edit .env, set DISABLE_ALL_ANOMALIES=1)
+docker compose up -d
+
+# Re-enable anomalies (edit .env, set DISABLE_ALL_ANOMALIES=0)
+docker compose up -d
+
+# Rebuild after code changes (bypass Docker cache)
+docker compose build --no-cache && docker compose up -d
+```
+
+### 5. What happens on startup
 
 The generator is fully automated — no mode switching needed:
 
@@ -197,8 +224,10 @@ Set `DISABLE_ALL_ANOMALIES=1` to force all entities to normal behavior — usefu
 
 The `instance_id` field identifies a container run:
 
-- **Auto-generated** (default): a new UUID is created each time the container starts. Restarting the container creates fresh entities in TrackMe.
-- **Fixed** (`INSTANCE_ID=my-fixed-id`): the same value is used across restarts. Useful when you want to preserve entity continuity in TrackMe.
+- **Auto-generated** (default): a new UUID is created each time the container starts. Restarting the container creates fresh entities in TrackMe. A full backfill is performed on startup.
+- **Fixed** (`INSTANCE_ID=<value>`): the same value is used across restarts. **Backfill is automatically skipped** since the historical data already exists in Splunk from the previous run. Useful when you want to preserve entity continuity in TrackMe.
+
+A typical workflow is to let the first run auto-generate an `instance_id`, copy it from the logs, then pin it in `.env` for subsequent restarts (so you keep the same entities without re-backfilling).
 
 In TrackMe, `instance_id` is used in the Flex Objects tracker formula to create unique entities per run (e.g., `object = "demo" . ":" . instance_id . ":" . ref`).
 
