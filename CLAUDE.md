@@ -95,6 +95,8 @@ Three entity sources, defined as module-level constants:
 
 3. **`SHORT_CYCLE_ENTITIES`** (3 entries) — Hardcoded entities pulled from `ENTITY_CATALOG` by exact `ref` match. Each has a fixed `anomaly_hours` duration with normal = 24 - anomaly hours, creating daily cycles for demos.
 
+4. **`BEHAVIOR_CHANGE_CATALOG`** (1 entry) — Entities with progressive ramp-up then baseline shift. Each entry defines `ramp_start_pct` (starting volume %), `change_days` (how many recent days are at the elevated level), and `shift_pct` (elevated volume %). Used for ML model retraining demos.
+
 ### Entity Profile Building (`build_entity_profiles()`)
 
 Order of entity creation:
@@ -234,6 +236,7 @@ All settings via environment variables (`.env` file):
 | `NUM_UPPER_OUTLIER` | `1` | Seasonal upper outlier entities |
 | `NUM_FLAT_NORMAL` | `1` | Flat normal entities |
 | `NUM_FLAT_LOWER_OUTLIER` | `1` | Flat lower outlier entities |
+| `NUM_BEHAVIOR_CHANGE` | `1` | Behavior-change entities (ramp-up → shift) |
 | `VARIATION_PCT` | `75` | Outlier variation (±%) |
 | `ANOMALY_DURATIONS` | `12,24,48` | Regular anomaly durations (hours, comma-separated) |
 | `NORMAL_DURATIONS` | `48,72,96,168` | Regular normal durations (hours, comma-separated) |
@@ -282,3 +285,13 @@ All outlier entities start anomaly immediately after backfill (set directly in `
 
 ### Flat Entity Behavior
 Flat entities skip both `DAY_MULTIPLIERS` and `hourly_multiplier()` in `generate_metric()`. They still support anomaly cycling (variation is applied regardless of flat flag). Their narrow baseline ranges (±5-10%) naturally produce steady volumes.
+
+### Behavior-Change Entity Timeline
+Behavior-change entities use a time-dependent multiplier in `generate_metric()` based on `behavior_change` dict fields:
+- `backfill_start`: set in `main()` to `now - backfill_days`
+- `backfill_days`: from config
+- `ramp_start_pct`: starting volume (e.g., 30%)
+- `change_days`: how many recent days are at elevated level (e.g., 30)
+- `shift_pct`: elevated volume (e.g., 130%)
+
+The multiplier is applied **during both backfill and continuous mode** — this is critical because the ramp-up must be visible in the historical data for the ML model to train on it. During continuous mode, the entity stays permanently at `shift_pct`.

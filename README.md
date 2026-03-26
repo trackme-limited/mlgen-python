@@ -13,6 +13,7 @@ ML Gen generates synthetic time-series data for testing and qualifying TrackMe's
 - **Anomaly cycling**: outlier entities automatically alternate between anomaly and normal phases, simulating realistic incident lifecycles
 - **Short-cycle entities**: three entities with short daily anomaly/recovery cycles for live demos
 - **Flat entities**: IT ops / metrics collection entities with no seasonality for `time_factor=none` demos
+- **Behavior-change entities**: progressive data onboarding ramp-up followed by a baseline shift — demonstrates ML model retraining / adaptation
 - **Instance tracking**: each container run gets a unique `instance_id` (auto-generated or fixed via config) — restart the container to get a fresh instance for TrackMe
 - **Backfill support**: populate historical data (default: 90 days) for ML model training, then automatically transitions to continuous generation
 - **HEC resilience**: retry with exponential backoff on HEC failures — the generator survives transient outages without crashing
@@ -115,6 +116,7 @@ All settings are controlled via the `.env` file (copy from `.env.example`):
 | `NUM_UPPER_OUTLIER` | `1` | Seasonal entities generating upper-bound outliers |
 | `NUM_FLAT_NORMAL` | `1` | Flat entities (no seasonality) generating normal data |
 | `NUM_FLAT_LOWER_OUTLIER` | `1` | Flat entities (no seasonality) generating lower-bound outliers |
+| `NUM_BEHAVIOR_CHANGE` | `1` | Entities with progressive ramp-up then baseline shift (for ML adaptation demos) |
 
 In addition to the above, 3 short-cycle entities are always included (see [Short-Cycle Entities](#short-cycle-entities-daily-anomalyrecovery) below).
 
@@ -193,6 +195,17 @@ Drawn from a catalog of 8 IT ops / metrics collection names (e.g., `metrics:coll
 - **Lower outlier** (`NUM_FLAT_LOWER_OUTLIER`): same flat profile but generates anomalously low values — simulates loss of metrics collectors, network transport failures, or systems going offline.
 
 Flat entities are useful for demonstrating ML outlier detection on KPIs where the TrackMe `time_factor` setting should be set to `none`, since the data doesn't follow time-of-day patterns.
+
+### Behavior-Change Entities (ML Adaptation Demo)
+
+These entities simulate **progressive data onboarding followed by a baseline shift**, a common real-world scenario where volume patterns change over time:
+
+1. **Ramp-up phase** (first ~60 days of backfill): volume grows linearly from 30% to 100% of baseline — simulates a new data source being progressively onboarded
+2. **Shift phase** (last ~30 days of backfill + continuous mode): volume jumps to 130% of baseline — simulates the source fully onboarded with slightly higher-than-expected volume
+
+The ML model trains on the full 90-day history (including the ramp), so it sees the recent elevated volume as anomalous. This is the perfect use case for demonstrating **model retraining / training adaptation** in TrackMe — the model needs to be retrained to accept the new normal.
+
+Drawn from the `BEHAVIOR_CHANGE_CATALOG` (default entity: `cloud:gcp:pubsub:audit`). Configure with `NUM_BEHAVIOR_CHANGE`.
 
 ### Short-Cycle Entities (Daily Anomaly/Recovery)
 
