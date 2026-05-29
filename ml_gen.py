@@ -92,6 +92,13 @@ def load_config() -> dict:
         "instance_id": os.environ.get("INSTANCE_ID", "").strip(),
         # Disable all anomalies: override all outlier behaviors to normal
         "disable_all_anomalies": os.environ.get("DISABLE_ALL_ANOMALIES", "0") in ("1", "true", "yes"),
+        # Entities exempt from DISABLE_ALL_ANOMALIES: comma-separated list of refs
+        # that keep generating anomalies even when all anomalies are disabled
+        "keep_anomalies_entities": [
+            ref.strip()
+            for ref in os.environ.get("KEEP_ANOMALIES_ENTITIES", "").split(",")
+            if ref.strip()
+        ],
     }
 
     if not config["hec_token"] and not config["dry_run"]:
@@ -928,10 +935,24 @@ def main():
             entity.behavior_change["backfill_start"] = backfill_start
             entity.behavior_change["backfill_days"] = config["backfill_days"]
 
-    # DISABLE_ALL_ANOMALIES: override all outlier behaviors to normal
+    # DISABLE_ALL_ANOMALIES: override all outlier behaviors to normal,
+    # except for any entities listed in KEEP_ANOMALIES_ENTITIES
     if config["disable_all_anomalies"]:
+        keep = set(config["keep_anomalies_entities"])
         logger.info("DISABLE_ALL_ANOMALIES=1 — all entities forced to normal behavior")
+        if keep:
+            present_refs = {e.ref for e in entities}
+            kept = sorted(r for r in keep if r in present_refs)
+            missing = sorted(r for r in keep if r not in present_refs)
+            if kept:
+                logger.info("KEEP_ANOMALIES_ENTITIES — keeping anomalies for: %s",
+                            ", ".join(kept))
+            if missing:
+                logger.warning("KEEP_ANOMALIES_ENTITIES — refs not found, ignored: %s",
+                               ", ".join(missing))
         for entity in entities:
+            if entity.ref in keep:
+                continue
             entity.behavior = "normal"
             entity.short_cycle_hours = None
 
@@ -950,6 +971,8 @@ def main():
     logger.info("  Instance ID:        %s%s", instance_id,
                 " (configured)" if config["instance_id"] else " (auto-generated)")
     logger.info("  Disable anomalies:  %s", config["disable_all_anomalies"])
+    if config["disable_all_anomalies"] and config["keep_anomalies_entities"]:
+        logger.info("  Keep anomalies for: %s", ", ".join(config["keep_anomalies_entities"]))
     logger.info("  HEC URL:            %s", config["hec_url"])
     logger.info("  Index:              %s", config["index"])
     logger.info("  Sourcetype:         %s", config["sourcetype"])

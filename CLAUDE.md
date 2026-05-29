@@ -180,6 +180,15 @@ When `DISABLE_ALL_ANOMALIES=1`:
 - Result: every entity generates clean baseline data, no anomaly cycling occurs
 - Useful for generating pure training data without any outliers
 
+### KEEP_ANOMALIES_ENTITIES
+
+A comma-separated allow-list of entity refs that are **exempt** from `DISABLE_ALL_ANOMALIES`:
+- Only takes effect when `DISABLE_ALL_ANOMALIES=1` (ignored otherwise)
+- Refs in the list keep their original `behavior` / `short_cycle_hours`, so they continue anomaly cycling while every other entity is forced to normal
+- Refs are matched exactly against `entity.ref`; refs not present in the generated set are logged as a warning and ignored
+- Behavior-change entities are unaffected by `DISABLE_ALL_ANOMALIES` in either case (the disable loop only touches `behavior`/`short_cycle_hours`)
+- Use case: a clean baseline for most entities while a couple of entities keep producing outliers for a focused ML demo
+
 ### INSTANCE_ID
 
 - If `INSTANCE_ID` env var is set and non-empty: that value is used for all events, and **backfill is skipped** (historical data already exists in Splunk from the previous run)
@@ -246,6 +255,7 @@ All settings via environment variables (`.env` file):
 | `SEASONALITY_MODE` | `curve` | `curve` (sine/noon) or `stdev` (Gaussian/18h) |
 | `INSTANCE_ID` | *(empty)* | Fixed instance ID; if empty, UUID auto-generated |
 | `DISABLE_ALL_ANOMALIES` | `0` | `1` = force all entities to normal behavior |
+| `KEEP_ANOMALIES_ENTITIES` | *(empty)* | Comma-separated refs that keep anomalies even when `DISABLE_ALL_ANOMALIES=1` |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `DRY_RUN` | `false` | Generate events without sending to HEC |
 
