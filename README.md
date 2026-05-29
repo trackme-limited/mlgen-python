@@ -143,6 +143,7 @@ In addition to the above, 3 short-cycle entities are always included (see [Short
 |---|---|---|
 | `INSTANCE_ID` | *(empty)* | Fixed instance ID for all events. If empty (default), a new UUID is generated each time the container starts. Set this to keep the same instance across restarts. |
 | `DISABLE_ALL_ANOMALIES` | `0` | Set to `1` to force ALL entities to normal behavior — no anomaly cycles will run. Useful for generating a clean baseline without any outliers. |
+| `KEEP_ANOMALIES_ENTITIES` | *(empty)* | Comma-separated list of entity refs that keep generating anomalies **even when** `DISABLE_ALL_ANOMALIES=1`. Lets you produce a clean baseline for most entities while a few keep cycling outliers. Only takes effect when `DISABLE_ALL_ANOMALIES=1`; unknown refs are ignored (logged as a warning). |
 
 ### Logging & Debug
 
@@ -233,6 +234,8 @@ This reproduces real-world scenarios where issues occur, get addressed, the enti
 During **backfill**, all entities (including outlier ones) generate normal data to ensure a clean ML training baseline.
 
 Set `DISABLE_ALL_ANOMALIES=1` to force all entities to normal behavior — useful for generating pure training data.
+
+To keep anomalies running for a chosen subset while everything else stays clean, combine `DISABLE_ALL_ANOMALIES=1` with `KEEP_ANOMALIES_ENTITIES`, a comma-separated list of entity refs to exempt. For example, `KEEP_ANOMALIES_ENTITIES=cloud:aws:cloudtrail,web:access_combined` keeps those two cycling outliers while all other entities generate a clean baseline.
 
 ## Instance ID
 
