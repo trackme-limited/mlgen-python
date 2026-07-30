@@ -37,6 +37,9 @@ class QualificationProfileTests(unittest.TestCase):
         ]
         self.assertEqual("incremental_ab", config["qualification_profile"])
         self.assertEqual(2, len(qualification_profiles))
+        self.assertEqual(1440, config["qualification_window_minutes"])
+        self.assertEqual(1500, config["qualification_new_regime_minutes"])
+        self.assertEqual(180, config["qualification_return_minutes"])
 
     def test_profile_can_be_disabled_explicitly(self):
         with patch.dict(
@@ -57,23 +60,60 @@ class QualificationProfileTests(unittest.TestCase):
             {profile.qualification["role"] for profile in pair},
         )
         self.assertEqual(pair[0].baseline, pair[1].baseline)
-        self.assertTrue(all(profile.flat for profile in pair))
+        self.assertTrue(all(not profile.flat for profile in pair))
         self.assertTrue(all(profile.scale_factor == 1.0 for profile in pair))
+        self.assertTrue(
+            all(
+                profile.qualification["seasonality"] == "daily_hour"
+                for profile in pair
+            )
+        )
 
     def test_phase_boundaries_follow_recurring_regime_timeline(self):
         _, pair = self.build_pair()
         qualification = pair[0].qualification
         start = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         qualification["start_time"] = start
+        warmup_end = qualification["warmup_minutes"]
+        new_regime_end = (
+            qualification["warmup_minutes"]
+            + qualification["new_regime_minutes"]
+        )
+        return_end = new_regime_end + qualification["return_minutes"]
 
         cases = (
             (start - timedelta(minutes=1), "bootstrap", "A", None),
             (start, "warmup", "A", 0),
-            (start + timedelta(minutes=9, seconds=59), "warmup", "A", 9),
-            (start + timedelta(minutes=10), "new_regime", "B", 10),
-            (start + timedelta(minutes=49, seconds=59), "new_regime", "B", 49),
-            (start + timedelta(minutes=50), "return_regime", "A", 50),
-            (start + timedelta(minutes=65), "complete", "A", 65),
+            (
+                start + timedelta(minutes=warmup_end, seconds=-1),
+                "warmup",
+                "A",
+                warmup_end - 1,
+            ),
+            (
+                start + timedelta(minutes=warmup_end),
+                "new_regime",
+                "B",
+                warmup_end,
+            ),
+            (
+                start + timedelta(minutes=new_regime_end, seconds=-1),
+                "new_regime",
+                "B",
+                new_regime_end - 1,
+            ),
+            (
+                start + timedelta(minutes=new_regime_end),
+                "return_regime",
+                "A",
+                new_regime_end,
+            ),
+            (
+                start + timedelta(minutes=return_end),
+                "complete",
+                "A",
+                return_end,
+            ),
         )
         for timestamp, expected_phase, expected_regime, expected_elapsed in cases:
             phase, regime, _, elapsed = ml_gen.qualification_phase_at(
@@ -88,14 +128,26 @@ class QualificationProfileTests(unittest.TestCase):
         start = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         for profile in pair:
             profile.qualification["start_time"] = start
+        qualification = pair[0].qualification
+        new_regime_end = (
+            qualification["warmup_minutes"]
+            + qualification["new_regime_minutes"]
+        )
+        return_end = new_regime_end + qualification["return_minutes"]
 
-        for offset in (-60, 0, 10 * 60, 50 * 60, 65 * 60):
+        for offset in (
+            -60,
+            0,
+            qualification["warmup_minutes"] * 60,
+            new_regime_end * 60,
+            return_end * 60,
+        ):
             timestamp = start + timedelta(seconds=offset)
             full = ml_gen.generate_metric(
                 timestamp, pair[0], 75, "test", "curve", random.Random(1)
             )
             incremental = ml_gen.generate_metric(
-                timestamp, pair[1], 75, "test", "stdev", random.Random(999)
+                timestamp, pair[1], 75, "test", "curve", random.Random(999)
             )
             self.assertEqual(full["dcount_hosts"], incremental["dcount_hosts"])
             self.assertEqual(full["events_count"], incremental["events_count"])
@@ -107,12 +159,37 @@ class QualificationProfileTests(unittest.TestCase):
                 full["qualification_regime"],
                 incremental["qualification_regime"],
             )
+            self.assertEqual("daily_hour", full["qualification_seasonality"])
 
             repeated = ml_gen.generate_metric(
                 timestamp, pair[0], 0, "test", "curve", random.Random(123)
             )
             self.assertEqual(full["dcount_hosts"], repeated["dcount_hosts"])
             self.assertEqual(full["events_count"], repeated["events_count"])
+
+    def test_pair_has_material_daily_hour_seasonality(self):
+        _, pair = self.build_pair()
+        profile = pair[0]
+        profile.qualification["start_time"] = datetime(
+            2026, 8, 1, tzinfo=timezone.utc
+        )
+        low = ml_gen.generate_metric(
+            datetime(2026, 7, 30, 6, 0, tzinfo=timezone.utc),
+            profile,
+            0,
+            "test",
+            "curve",
+            random.Random(),
+        )
+        high = ml_gen.generate_metric(
+            datetime(2026, 7, 30, 18, 0, tzinfo=timezone.utc),
+            profile,
+            0,
+            "test",
+            "curve",
+            random.Random(),
+        )
+        self.assertGreater(high["events_count"], low["events_count"] * 2.5)
 
     def test_regime_b_is_materially_higher_than_regime_a(self):
         _, pair = self.build_pair()
@@ -176,7 +253,9 @@ class QualificationProfileTests(unittest.TestCase):
             ml_gen.validate_config(config)
 
         config = self.load_qualification_config()
-        config["qualification_new_regime_minutes"] = 30
+        config["qualification_new_regime_minutes"] = config[
+            "qualification_window_minutes"
+        ]
         with self.assertRaisesRegex(
             ValueError, "must be greater than QUALIFICATION_WINDOW_MINUTES"
         ):

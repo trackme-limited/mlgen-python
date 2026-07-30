@@ -152,10 +152,10 @@ In addition to the above, 3 short-cycle entities are always included (see [Short
 |---|---|---|
 | `QUALIFICATION_PROFILE` | `incremental_ab` | Generates the paired recurring-regime scenario by default; set to `off` to suppress only the two qualification entities |
 | `QUALIFICATION_SEED` | `42` | Stable seed shared by the pair |
-| `QUALIFICATION_WINDOW_MINUTES` | `30` | TrackMe calculation-window length used to validate the scenario timing |
+| `QUALIFICATION_WINDOW_MINUTES` | `1440` | TrackMe calculation-window length; 24 hours covers every `%H` seasonality group |
 | `QUALIFICATION_WARMUP_MINUTES` | `10` | Regime A live warmup after historical bootstrap |
-| `QUALIFICATION_NEW_REGIME_MINUTES` | `40` | Regime B duration; must exceed the model window |
-| `QUALIFICATION_RETURN_MINUTES` | `15` | Regime A comparison period after it returns |
+| `QUALIFICATION_NEW_REGIME_MINUTES` | `1500` | Regime B duration (25 hours); must exceed the model window |
+| `QUALIFICATION_RETURN_MINUTES` | `180` | Regime A comparison period (3 hours) after it returns |
 | `QUALIFICATION_REGIME_A_PCT` | `100` | Original regime level |
 | `QUALIFICATION_REGIME_B_PCT` | `140` | New regime level |
 | `QUALIFICATION_NOISE_PCT` | `2` | Natural range around each regime, from 0 to 25 |
@@ -198,6 +198,7 @@ Qualification events additionally contain:
 |---|---|
 | `qualification_profile` | `incremental_ab` |
 | `qualification_scenario` | `recurring_regime` |
+| `qualification_seasonality` | `daily_hour`, matching TrackMe `time_factor=%H` |
 | `qualification_pair` | Stable pair identifier |
 | `qualification_trackme_mode` | Intended TrackMe configuration: `full` or `incremental` |
 | `qualification_phase` | `bootstrap`, `warmup`, `new_regime`, `return_regime`, or `complete` |
@@ -253,20 +254,25 @@ of the timestamp, pair, and `QUALIFICATION_SEED`, so entity ordering, container
 randomness, and the selected seasonality mode cannot bias the comparison. The
 only experimental variable should be the TrackMe training mode.
 
-The default 65-minute live timeline is:
+Both entities follow the same daily hour-of-day curve. Weekday multipliers are
+deliberately excluded from this pair, making `%H` the exact TrackMe seasonality
+factor rather than an approximation of the generated pattern.
+
+The default 28-hour, 10-minute live timeline is:
 
 ```text
-historical bootstrap     10m warmup A       40m regime B        15m return A
-A A A A A A ...       | A A A A A A ... | B B B B B B ... | A A A A A A ...
-                       ^ train both         ^ keep training     ^ compare memory
+historical seasonal A    10m A warmup       25h regime B        3h return A
+A by hour ...         | A A A ...        | B by hour ...     | A by hour ...
+                      ^ train both         ^ keep training     ^ compare memory
 ```
 
-Regime B lasts longer than the 30-minute TrackMe calculation window. Repeated
-full training eventually sees only B and replaces its former view of A.
-Incremental training refits from its bounded retained sample, which still
-contains observations from A. When A returns, the paired models therefore
-expose the practical difference between recent-window replacement and retained
-historical memory.
+Regime B lasts longer than the 24-hour TrackMe calculation window, so every
+hourly group receives regime B. Repeated full training eventually sees only B
+for all 24 groups and replaces its former view of A. Incremental training
+refits each group from its bounded retained sample, which still contains
+observations from A. When A returns, the paired models expose the practical
+difference between recent-window replacement and retained historical memory
+without ignoring the seasonality seen in typical deployments.
 
 #### Qualification runbook
 
@@ -274,15 +280,15 @@ historical memory.
 
    ```dotenv
    QUALIFICATION_PROFILE=incremental_ab
-   QUALIFICATION_WINDOW_MINUTES=30
+   QUALIFICATION_WINDOW_MINUTES=1440
    GENERATION_INTERVAL=60
    BACKFILL_INTERVAL=60
    ```
 
 2. Discover both entities in the same TrackMe tenant and create native
    `TrackMeNativeDensityFunction` models stored in KV Store. Use identical
-   settings: `kpi_span=1m`, `time_factor=none`,
-   `period_calculation=-30m`, and `period_calculation_latest=-1m`.
+   settings: `kpi_span=1m`, `time_factor=%H`,
+   `period_calculation=-24h`, and `period_calculation_latest=-1m`.
 3. Set the first model to `full` and the second to `incremental`. Do not use
    legacy MLTK models: incremental training is intentionally unsupported for
    them.
