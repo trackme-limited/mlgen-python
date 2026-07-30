@@ -12,6 +12,7 @@ Each container run gets a unique instance_id, so restarting the container
 creates a fresh instance that can be tracked independently in TrackMe.
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -99,6 +100,33 @@ def load_config() -> dict:
             for ref in os.environ.get("KEEP_ANOMALIES_ENTITIES", "").split(",")
             if ref.strip()
         ],
+        # Full-versus-incremental paired qualification scenario
+        "qualification_profile": os.environ.get("QUALIFICATION_PROFILE", "").strip().lower(),
+        "qualification_seed": int(os.environ.get("QUALIFICATION_SEED", "42")),
+        "qualification_window_minutes": int(
+            os.environ.get("QUALIFICATION_WINDOW_MINUTES", "30")
+        ),
+        "qualification_warmup_minutes": int(
+            os.environ.get("QUALIFICATION_WARMUP_MINUTES", "10")
+        ),
+        "qualification_new_regime_minutes": int(
+            os.environ.get("QUALIFICATION_NEW_REGIME_MINUTES", "40")
+        ),
+        "qualification_return_minutes": int(
+            os.environ.get("QUALIFICATION_RETURN_MINUTES", "15")
+        ),
+        "qualification_regime_a_pct": int(
+            os.environ.get("QUALIFICATION_REGIME_A_PCT", "100")
+        ),
+        "qualification_regime_b_pct": int(
+            os.environ.get("QUALIFICATION_REGIME_B_PCT", "140")
+        ),
+        "qualification_noise_pct": int(
+            os.environ.get("QUALIFICATION_NOISE_PCT", "2")
+        ),
+        "qualification_start_time": os.environ.get(
+            "QUALIFICATION_START_TIME", ""
+        ).strip(),
     }
 
     if not config["hec_token"] and not config["dry_run"]:
@@ -109,6 +137,59 @@ def load_config() -> dict:
         sys.exit(1)
 
     return config
+
+
+def validate_config(config: dict):
+    """Validate related configuration values before generation starts."""
+    profile = config["qualification_profile"]
+    if profile == "off":
+        config["qualification_profile"] = ""
+        profile = ""
+    if profile not in ("", "incremental_ab"):
+        raise ValueError(
+            "QUALIFICATION_PROFILE must be empty, off, or incremental_ab"
+        )
+    if not profile:
+        return
+
+    positive_values = (
+        "qualification_window_minutes",
+        "qualification_warmup_minutes",
+        "qualification_new_regime_minutes",
+        "qualification_return_minutes",
+        "qualification_regime_a_pct",
+        "qualification_regime_b_pct",
+    )
+    for key in positive_values:
+        if config[key] <= 0:
+            raise ValueError(f"{key.upper()} must be greater than zero")
+
+    if not 0 <= config["qualification_noise_pct"] <= 25:
+        raise ValueError("QUALIFICATION_NOISE_PCT must be between 0 and 25")
+    if (
+        config["qualification_new_regime_minutes"]
+        <= config["qualification_window_minutes"]
+    ):
+        raise ValueError(
+            "QUALIFICATION_NEW_REGIME_MINUTES must be greater than "
+            "QUALIFICATION_WINDOW_MINUTES so a full model can forget regime A"
+        )
+    if config["qualification_start_time"]:
+        parse_utc_datetime(config["qualification_start_time"])
+
+
+def parse_utc_datetime(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp and normalize it to UTC."""
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "QUALIFICATION_START_TIME must be an ISO-8601 timestamp"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -228,13 +309,27 @@ BEHAVIOR_CHANGE_CATALOG = [
     },
 ]
 
+# Opt-in qualification pair. Both entities deliberately share a baseline and
+# deterministic sample stream. Their only intended difference is the training
+# mode selected for their TrackMe models.
+QUALIFICATION_PAIR_CATALOG = [
+    {
+        "pair_id": "recurring_regime_01",
+        "full_ref": "qualification:recurring-regime:full",
+        "incremental_ref": "qualification:recurring-regime:incremental",
+        "dcount_hosts": 500,
+        "events_count": 2_000_000,
+    },
+]
+
 
 class EntityProfile:
     """Represents a single entity with its own baseline and behavior."""
 
     def __init__(self, ref: str, behavior: str, baseline: dict, scale_factor: float,
                  flat: bool = False, short_cycle_hours: int | None = None,
-                 behavior_change: dict | None = None):
+                 behavior_change: dict | None = None,
+                 qualification: dict | None = None):
         self.ref = ref
         self.behavior = behavior  # "normal", "lower_outlier", "upper_outlier"
         self.baseline = baseline  # {"dcount_hosts": (lo, hi), "events_count": (lo, hi)}
@@ -245,6 +340,7 @@ class EntityProfile:
         # Dict with keys: ramp_start_pct, change_days, shift_pct, backfill_start
         # Set by main() after backfill timeline is known.
         self.behavior_change = behavior_change
+        self.qualification = qualification
 
         # Short-cycle anomaly: fixed anomaly duration (hours), normal = 24 - anomaly
         # When set, this entity uses its own durations instead of the global lists.
@@ -457,6 +553,50 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
         )
         profiles.append(profile)
 
+    # 5. Paired full-versus-incremental qualification entities
+    if config["qualification_profile"] == "incremental_ab":
+        noise = config["qualification_noise_pct"] / 100.0
+        for pair in QUALIFICATION_PAIR_CATALOG:
+            baseline = {
+                "dcount_hosts": (
+                    round(pair["dcount_hosts"] * (1 - noise)),
+                    round(pair["dcount_hosts"] * (1 + noise)),
+                ),
+                "events_count": (
+                    round(pair["events_count"] * (1 - noise)),
+                    round(pair["events_count"] * (1 + noise)),
+                ),
+            }
+            common = {
+                "profile": "incremental_ab",
+                "scenario": "recurring_regime",
+                "pair_id": pair["pair_id"],
+                "seed": config["qualification_seed"],
+                "window_minutes": config["qualification_window_minutes"],
+                "warmup_minutes": config["qualification_warmup_minutes"],
+                "new_regime_minutes": config["qualification_new_regime_minutes"],
+                "return_minutes": config["qualification_return_minutes"],
+                "regime_a_pct": config["qualification_regime_a_pct"],
+                "regime_b_pct": config["qualification_regime_b_pct"],
+                "start_time": None,
+            }
+            for role, ref_key in (
+                ("full", "full_ref"),
+                ("incremental", "incremental_ref"),
+            ):
+                qualification = dict(common)
+                qualification["role"] = role
+                profiles.append(
+                    EntityProfile(
+                        ref=pair[ref_key],
+                        behavior="normal",
+                        baseline=dict(baseline),
+                        scale_factor=1.0,
+                        flat=True,
+                        qualification=qualification,
+                    )
+                )
+
     return profiles
 
 
@@ -484,6 +624,111 @@ def hourly_multiplier(hour: int, mode: str = "curve") -> float:
     return max(multiplier, 0.5)
 
 
+def qualification_phase_at(
+    dt: datetime,
+    qualification: dict,
+) -> tuple[str, str, float, int | None]:
+    """Return phase, regime, multiplier, and elapsed minutes for a scenario."""
+    start_time = qualification["start_time"]
+    regime_a = qualification["regime_a_pct"] / 100.0
+    regime_b = qualification["regime_b_pct"] / 100.0
+    if start_time is None or dt < start_time:
+        return "bootstrap", "A", regime_a, None
+
+    elapsed_seconds = (dt - start_time).total_seconds()
+    elapsed_minutes = int(elapsed_seconds // 60)
+    warmup_end = qualification["warmup_minutes"] * 60
+    new_regime_end = warmup_end + qualification["new_regime_minutes"] * 60
+    return_end = new_regime_end + qualification["return_minutes"] * 60
+
+    if elapsed_seconds < warmup_end:
+        return "warmup", "A", regime_a, elapsed_minutes
+    if elapsed_seconds < new_regime_end:
+        return "new_regime", "B", regime_b, elapsed_minutes
+    if elapsed_seconds < return_end:
+        return "return_regime", "A", regime_a, elapsed_minutes
+    return "complete", "A", regime_a, elapsed_minutes
+
+
+def qualification_sample_rng(dt: datetime, qualification: dict) -> random.Random:
+    """Build a stable RNG shared by both members of a qualification pair."""
+    material = (
+        f"{qualification['seed']}|{qualification['pair_id']}|{int(dt.timestamp())}"
+    ).encode("utf-8")
+    digest = hashlib.sha256(material).digest()
+    return random.Random(int.from_bytes(digest[:8], byteorder="big"))
+
+
+def initialize_qualification_timeline(
+    config: dict,
+    entities: list[EntityProfile],
+    logger: logging.Logger,
+    now: datetime | None = None,
+):
+    """Set one shared scenario start time after bootstrap data is ready."""
+    qualification_entities = [e for e in entities if e.qualification is not None]
+    if not qualification_entities:
+        return
+
+    if config["qualification_start_time"]:
+        start_time = parse_utc_datetime(config["qualification_start_time"])
+        source = "configured"
+    else:
+        start_time = now or datetime.now(timezone.utc)
+        source = "generated"
+
+    for entity in qualification_entities:
+        entity.qualification["start_time"] = start_time
+
+    logger.info(
+        "QUALIFICATION timeline initialized: profile=incremental_ab "
+        "start=%s (%s)",
+        start_time.isoformat(),
+        source,
+    )
+    if not config["qualification_start_time"] and config["instance_id"]:
+        logger.warning(
+            "QUALIFICATION_START_TIME is not set; recreating this fixed-instance "
+            "generator will restart the qualification timeline"
+        )
+
+
+QUALIFICATION_CHECKPOINT_MESSAGES = {
+    "bootstrap": "bootstrap history is being generated; do not compare models yet",
+    "warmup": "bootstrap is ready; configure and train both native KV models",
+    "new_regime": "regime B started; allow it to outlive the full-model window",
+    "return_regime": (
+        "regime A returned; retrain both models and compare retained memory"
+    ),
+    "complete": "comparison window completed; results are ready for review",
+}
+
+
+def log_qualification_checkpoints(
+    entities: list[EntityProfile],
+    dt: datetime,
+    previous_phases: dict[str, str],
+    logger: logging.Logger,
+):
+    """Log each qualification phase transition once per pair."""
+    for entity in entities:
+        qualification = entity.qualification
+        if qualification is None:
+            continue
+        pair_id = qualification["pair_id"]
+        phase, regime, _, _ = qualification_phase_at(dt, qualification)
+        if previous_phases.get(pair_id) == phase:
+            continue
+        previous_phases[pair_id] = phase
+        logger.info(
+            "QUALIFICATION CHECKPOINT pair=%s phase=%s regime=%s — %s",
+            pair_id,
+            phase,
+            regime,
+            QUALIFICATION_CHECKPOINT_MESSAGES[phase],
+        )
+
+
 def generate_metric(
     dt: datetime,
     entity: EntityProfile,
@@ -499,12 +744,36 @@ def generate_metric(
     # Base ranges from entity profile
     dcount_lo, dcount_hi = entity.baseline["dcount_hosts"]
     events_lo, events_hi = entity.baseline["events_count"]
+    sample_rng = rng
+    qualification_metadata = None
 
     # Apply entity-unique scale factor
     dcount_lo = int(dcount_lo * entity.scale_factor)
     dcount_hi = int(dcount_hi * entity.scale_factor)
     events_lo = int(events_lo * entity.scale_factor)
     events_hi = int(events_hi * entity.scale_factor)
+
+    # Apply the paired qualification regime. A stable per-sample RNG makes
+    # both entities exactly equal at a given timestamp regardless of iteration
+    # order; only their refs and intended TrackMe modes differ.
+    if entity.qualification is not None:
+        phase, regime, regime_mult, elapsed_minutes = qualification_phase_at(
+            dt, entity.qualification
+        )
+        dcount_lo = int(dcount_lo * regime_mult)
+        dcount_hi = int(dcount_hi * regime_mult)
+        events_lo = int(events_lo * regime_mult)
+        events_hi = int(events_hi * regime_mult)
+        sample_rng = qualification_sample_rng(dt, entity.qualification)
+        qualification_metadata = {
+            "qualification_profile": entity.qualification["profile"],
+            "qualification_scenario": entity.qualification["scenario"],
+            "qualification_pair": entity.qualification["pair_id"],
+            "qualification_trackme_mode": entity.qualification["role"],
+            "qualification_phase": phase,
+            "qualification_regime": regime,
+            "qualification_elapsed_minutes": elapsed_minutes,
+        }
 
     # Apply behavior-change time-dependent multiplier
     # Simulates progressive data onboarding → baseline shift
@@ -580,10 +849,10 @@ def generate_metric(
     events_lo = max(1, events_lo)
     events_hi = max(events_lo, events_hi)
 
-    dcount = rng.randint(dcount_lo, dcount_hi)
-    events = rng.randint(events_lo, events_hi)
+    dcount = sample_rng.randint(dcount_lo, dcount_hi)
+    events = sample_rng.randint(events_lo, events_hi)
 
-    return {
+    metric = {
         "time": int(dt.timestamp()),
         "time_human": dt.strftime("%c"),
         "dcount_hosts": dcount,
@@ -591,6 +860,9 @@ def generate_metric(
         "ref": entity.ref,
         "instance_id": instance_id,
     }
+    if qualification_metadata is not None:
+        metric.update(qualification_metadata)
+    return metric
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +994,6 @@ def run_backfill(
     """Generate historical data for all entities."""
     days = config["backfill_days"]
     interval = config["backfill_interval"]
-    variation_pct = config["variation_pct"]
     seasonality_mode = config["seasonality_mode"]
 
     end_time = datetime.now(timezone.utc)
@@ -804,6 +1075,7 @@ def run_continuous(
     anomaly_durations = config["anomaly_durations"]
     normal_durations = config["normal_durations"]
     rng = random.Random()
+    qualification_phases: dict[str, str] = {}
 
     # Initialize anomaly cycling for outlier entities.
     # ALL outlier entities start immediately in anomaly right after backfill
@@ -839,6 +1111,9 @@ def run_continuous(
                 )
                 current_time = gap_start
                 while current_time <= now:
+                    log_qualification_checkpoints(
+                        entities, current_time, qualification_phases, logger
+                    )
                     for entity in entities:
                         metric = generate_metric(
                             current_time, entity, variation_pct, instance_id,
@@ -856,6 +1131,9 @@ def run_continuous(
         cycle_start = time.time()
         cycle += 1
         now = datetime.now(timezone.utc)
+        log_qualification_checkpoints(
+            entities, now, qualification_phases, logger
+        )
 
         # Check for phase transitions on outlier entities
         for entity in entities:
@@ -909,6 +1187,11 @@ def run_continuous(
 
 def main():
     config = load_config()
+    try:
+        validate_config(config)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     setup_logging(config["log_level"])
     logger = logging.getLogger("ml_gen")
 
@@ -962,7 +1245,11 @@ def main():
     seasonal_normal = sum(1 for e in entities if e.behavior == "normal" and not e.flat and e.short_cycle_hours is None and e.behavior_change is None)
     seasonal_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and not e.flat and e.short_cycle_hours is None)
     seasonal_upper = sum(1 for e in entities if e.behavior == "upper_outlier" and not e.flat and e.short_cycle_hours is None)
-    flat_normal = sum(1 for e in entities if e.behavior == "normal" and e.flat)
+    flat_normal = sum(
+        1
+        for e in entities
+        if e.behavior == "normal" and e.flat and e.qualification is None
+    )
     flat_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and e.flat)
 
     logger.info("=" * 70)
@@ -1001,6 +1288,21 @@ def main():
                         e.ref, bc["ramp_start_pct"],
                         bc["backfill_days"] - bc["change_days"],
                         bc["shift_pct"])
+    qualification_entities = [e for e in entities if e.qualification is not None]
+    logger.info("  Qualification profile: %s", config["qualification_profile"] or "off")
+    if qualification_entities:
+        qualification = qualification_entities[0].qualification
+        logger.info(
+            "    Recurring regime: A=%d%% for %dm warmup, B=%d%% for %dm, "
+            "A return for %dm (model window=%dm, seed=%d)",
+            qualification["regime_a_pct"],
+            qualification["warmup_minutes"],
+            qualification["regime_b_pct"],
+            qualification["new_regime_minutes"],
+            qualification["return_minutes"],
+            qualification["window_minutes"],
+            qualification["seed"],
+        )
     logger.info("  Generation interval: %ds", config["generation_interval"])
     logger.info("  HEC batch size:     %d", config["hec_batch_size"])
     logger.info("  Dry run:            %s", config["dry_run"])
@@ -1011,6 +1313,8 @@ def main():
     for entity in entities:
         if entity.behavior_change is not None:
             entity_type = "behavior-change"
+        elif entity.qualification is not None:
+            entity_type = f"qualification-{entity.qualification['role']}"
         elif entity.short_cycle_hours is not None:
             entity_type = f"short-cycle({entity.short_cycle_hours}h)"
         elif entity.flat:
@@ -1042,6 +1346,10 @@ def main():
     else:
         backfill_end_time = run_backfill(config, entities, instance_id, hec, logger)
         logger.info("Backfill complete. Transitioning to continuous generation...")
+
+    # Start the A/B timeline only after historical bootstrap generation is
+    # complete, so slow backfills cannot consume the live qualification phases.
+    initialize_qualification_timeline(config, entities, logger)
 
     # Phase 2: Continuous generation (entities follow their assigned behaviors)
     run_continuous(config, entities, instance_id, hec, logger, backfill_end_time)
