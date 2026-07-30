@@ -14,6 +14,7 @@ ML Gen generates synthetic time-series data for testing and qualifying TrackMe's
 - **Short-cycle entities**: three entities with short daily anomaly/recovery cycles for live demos
 - **Flat entities**: IT ops / metrics collection entities with no seasonality for `time_factor=none` demos
 - **Behavior-change entities**: progressive data onboarding ramp-up followed by a baseline shift — demonstrates ML model retraining / adaptation
+- **Incremental A/B qualification**: default-on, deterministic paired entities demonstrate what a full model forgets and an incremental model retains without altering other entities
 - **Instance tracking**: each container run gets a unique `instance_id` (auto-generated or fixed via config) — restart the container to get a fresh instance for TrackMe
 - **Backfill support**: populate historical data (default: 90 days) for ML model training, then automatically transitions to continuous generation
 - **HEC resilience**: retry with exponential backoff on HEC failures — the generator survives transient outages without crashing
@@ -145,6 +146,21 @@ In addition to the above, 3 short-cycle entities are always included (see [Short
 | `DISABLE_ALL_ANOMALIES` | `0` | Set to `1` to force ALL entities to normal behavior — no anomaly cycles will run. Useful for generating a clean baseline without any outliers. |
 | `KEEP_ANOMALIES_ENTITIES` | *(empty)* | Comma-separated list of entity refs that keep generating anomalies **even when** `DISABLE_ALL_ANOMALIES=1`. Lets you produce a clean baseline for most entities while a few keep cycling outliers. Only takes effect when `DISABLE_ALL_ANOMALIES=1`; unknown refs are ignored (logged as a warning). |
 
+### Full versus Incremental Qualification
+
+| Variable | Default | Description |
+|---|---|---|
+| `QUALIFICATION_PROFILE` | `incremental_ab` | Generates the paired recurring-regime scenario by default; set to `off` to suppress only the two qualification entities |
+| `QUALIFICATION_SEED` | `42` | Stable seed shared by the pair |
+| `QUALIFICATION_WINDOW_MINUTES` | `30` | TrackMe calculation-window length used to validate the scenario timing |
+| `QUALIFICATION_WARMUP_MINUTES` | `10` | Regime A live warmup after historical bootstrap |
+| `QUALIFICATION_NEW_REGIME_MINUTES` | `40` | Regime B duration; must exceed the model window |
+| `QUALIFICATION_RETURN_MINUTES` | `15` | Regime A comparison period after it returns |
+| `QUALIFICATION_REGIME_A_PCT` | `100` | Original regime level |
+| `QUALIFICATION_REGIME_B_PCT` | `140` | New regime level |
+| `QUALIFICATION_NOISE_PCT` | `2` | Natural range around each regime, from 0 to 25 |
+| `QUALIFICATION_START_TIME` | *(empty)* | Optional ISO-8601 timeline start; pin it with `INSTANCE_ID` to continue across container recreation |
+
 ### Logging & Debug
 
 | Variable | Default | Description |
@@ -175,6 +191,18 @@ Each event sent to Splunk looks like:
 | `events_count` | Simulated event volume |
 | `ref` | Entity identifier (e.g., `security:linux_secure`) — use this as the entity key in TrackMe |
 | `instance_id` | Container run identifier — auto-generated UUID or fixed value from `INSTANCE_ID` config |
+
+Qualification events additionally contain:
+
+| Field | Description |
+|---|---|
+| `qualification_profile` | `incremental_ab` |
+| `qualification_scenario` | `recurring_regime` |
+| `qualification_pair` | Stable pair identifier |
+| `qualification_trackme_mode` | Intended TrackMe configuration: `full` or `incremental` |
+| `qualification_phase` | `bootstrap`, `warmup`, `new_regime`, `return_regime`, or `complete` |
+| `qualification_regime` | `A` or `B` |
+| `qualification_elapsed_minutes` | Minutes since the live scenario began; null during historical bootstrap |
 
 ## Entity Types
 
@@ -207,6 +235,101 @@ These entities simulate **progressive data onboarding followed by a baseline shi
 The ML model trains on the full 90-day history (including the ramp), so it sees the recent elevated volume as anomalous. This is the perfect use case for demonstrating **model retraining / training adaptation** in TrackMe — the model needs to be retrained to accept the new normal.
 
 Drawn from the `BEHAVIOR_CHANGE_CATALOG` (default entity: `cloud:gcp:pubsub:audit`). Configure with `NUM_BEHAVIOR_CHANGE`.
+
+### Full versus Incremental Qualification
+
+The `incremental_ab` profile is enabled by default and adds this controlled
+pair. Set `QUALIFICATION_PROFILE=off` to suppress the pair without changing any
+other entity:
+
+| Entity ref | TrackMe model setting |
+|---|---|
+| `qualification:recurring-regime:full` | `full` |
+| `qualification:recurring-regime:incremental` | `incremental` |
+
+The two entities receive **exactly the same `dcount_hosts` and
+`events_count` at every timestamp**. Their sample is derived from a stable hash
+of the timestamp, pair, and `QUALIFICATION_SEED`, so entity ordering, container
+randomness, and the selected seasonality mode cannot bias the comparison. The
+only experimental variable should be the TrackMe training mode.
+
+The default 65-minute live timeline is:
+
+```text
+historical bootstrap     10m warmup A       40m regime B        15m return A
+A A A A A A ...       | A A A A A A ... | B B B B B B ... | A A A A A A ...
+                       ^ train both         ^ keep training     ^ compare memory
+```
+
+Regime B lasts longer than the 30-minute TrackMe calculation window. Repeated
+full training eventually sees only B and replaces its former view of A.
+Incremental training refits from its bounded retained sample, which still
+contains observations from A. When A returns, the paired models therefore
+expose the practical difference between recent-window replacement and retained
+historical memory.
+
+#### Qualification runbook
+
+1. Start a fresh generator with at least:
+
+   ```dotenv
+   QUALIFICATION_PROFILE=incremental_ab
+   QUALIFICATION_WINDOW_MINUTES=30
+   GENERATION_INTERVAL=60
+   BACKFILL_INTERVAL=60
+   ```
+
+2. Discover both entities in the same TrackMe tenant and create native
+   `TrackMeNativeDensityFunction` models stored in KV Store. Use identical
+   settings: `kpi_span=1m`, `time_factor=none`,
+   `period_calculation=-30m`, and `period_calculation_latest=-1m`.
+3. Set the first model to `full` and the second to `incremental`. Do not use
+   legacy MLTK models: incremental training is intentionally unsupported for
+   them.
+4. During `warmup`, train both models once. Continue scheduled or manual
+   training on the same cadence for both models through `new_regime`.
+5. At `return_regime`, train both models and compare their bounds and anomaly
+   decisions over the paired values. The full model should reflect recent B;
+   the incremental model should retain evidence of A as well as B.
+6. Exercise rollback by bulk-editing the incremental entity's model to `full`
+   and retraining it. This should perform a standard full refit and clear its
+   incremental state.
+
+Generator logs announce each transition once:
+
+```text
+QUALIFICATION CHECKPOINT pair=recurring_regime_01 phase=warmup regime=A
+QUALIFICATION CHECKPOINT pair=recurring_regime_01 phase=new_regime regime=B
+QUALIFICATION CHECKPOINT pair=recurring_regime_01 phase=return_regime regime=A
+QUALIFICATION CHECKPOINT pair=recurring_regime_01 phase=complete regime=A
+```
+
+Use the event metadata to inspect the live phase:
+
+```spl
+index=mlgen qualification_pair=recurring_regime_01
+| stats latest(qualification_phase) as phase
+        latest(qualification_regime) as regime
+        latest(qualification_elapsed_minutes) as elapsed_minutes
+        by qualification_trackme_mode
+```
+
+This equality check must return no rows:
+
+```spl
+index=mlgen qualification_pair=recurring_regime_01
+| stats dc(qualification_trackme_mode) as roles
+        dc(dcount_hosts) as host_variants
+        dc(events_count) as event_variants
+        by _time qualification_pair
+| where roles != 2 OR host_variants != 1 OR event_variants != 1
+```
+
+For a fresh run, leave `INSTANCE_ID` and `QUALIFICATION_START_TIME` empty. The
+historical A bootstrap is generated first and the live timeline starts only
+after backfill completes. If the container must be recreated without restarting
+the scenario, pin both values; otherwise a fixed instance with no start time
+intentionally starts a new timeline and logs a warning.
 
 ### Short-Cycle Entities (Daily Anomaly/Recovery)
 

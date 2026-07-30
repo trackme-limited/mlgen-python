@@ -13,6 +13,7 @@ mlgen-python/
 ├── entrypoint.sh          # Validates HEC token, prints config banner, exec python3
 ├── .env.example           # All configuration options documented with comments
 ├── requirements.txt       # Python deps: requests, urllib3
+├── tests/                 # Focused unittest regression coverage
 ├── README.md              # User-facing documentation
 └── CLAUDE.md              # This file — developer architecture reference
 ```
@@ -21,7 +22,7 @@ mlgen-python/
 
 Version is stored in `version.json` at the repo root:
 ```json
-{"version": "1.1.0", "app_id": "mlgen-python", "description": "..."}
+{"version": "1.2.0", "app_id": "mlgen-python", "description": "..."}
 ```
 `ml_gen.py` reads `__version__` from this file at import time.
 
@@ -42,10 +43,12 @@ Container starts
       1. load_config() — reads all env vars
       2. instance_id — from INSTANCE_ID env or generate UUID
       3. build_entity_profiles() — creates entity list from catalogs
-      4. DISABLE_ALL_ANOMALIES check — overrides all behaviors to normal if set
-      5. run_backfill() — generates BACKFILL_DAYS of historical data (all normal)
+      4. validate_config() — validates the default-on qualification timeline
+      5. DISABLE_ALL_ANOMALIES check — overrides all behaviors to normal if set
+      6. run_backfill() — generates BACKFILL_DAYS of historical data (all normal)
          ↳ SKIPPED if INSTANCE_ID is set (data already exists in Splunk)
-      6. run_continuous() — infinite loop generating real-time data with anomaly cycling
+      7. initialize_qualification_timeline() — starts default-on live A/B phases
+      8. run_continuous() — infinite loop generating real-time data with anomaly cycling
 ```
 
 ### Key Classes
@@ -63,6 +66,7 @@ Represents a single entity with its own baseline, behavior, and anomaly cycling 
 | `short_cycle_hours` | `int \| None` | If set, fixed anomaly duration; normal = 24 - this |
 | `is_in_anomaly` | `bool` | Current anomaly cycling state |
 | `phase_end_time` | `datetime \| None` | When current phase (anomaly/normal) expires |
+| `qualification` | `dict \| None` | Paired A/B scenario definition, role, and timeline |
 
 Key methods:
 - `is_outlier()` — whether behavior is lower/upper outlier
@@ -97,12 +101,18 @@ Three entity sources, defined as module-level constants:
 
 4. **`BEHAVIOR_CHANGE_CATALOG`** (1 entry) — Entities with progressive ramp-up then baseline shift. Each entry defines `ramp_start_pct` (starting volume %), `change_days` (how many recent days are at the elevated level), and `shift_pct` (elevated volume %). Used for ML model retraining demos.
 
+5. **`QUALIFICATION_PAIR_CATALOG`** (1 pair) — Default-on flat entities with a
+shared baseline and deterministic samples for isolating TrackMe full versus
+incremental training behavior.
+
 ### Entity Profile Building (`build_entity_profiles()`)
 
 Order of entity creation:
 1. **Short-cycle entities** — matched by exact ref from `ENTITY_CATALOG`, removed from the seasonal pool to avoid duplicates
 2. **Seasonal entities** — picked from remaining `ENTITY_CATALOG` (shuffled with seed 42), split across normal/lower/upper by `NUM_*` counts
 3. **Flat entities** — picked from `FLAT_ENTITY_CATALOG` (shuffled with seed 42), split across normal/lower by `NUM_FLAT_*` counts
+4. **Behavior-change entities** — picked from `BEHAVIOR_CHANGE_CATALOG`
+5. **Qualification pair** — appended by default; omitted only for `QUALIFICATION_PROFILE=off`
 
 If more entities are requested than catalog entries, extras use `ENTITY_PREFIX` fallback naming.
 
@@ -111,11 +121,34 @@ If more entities are requested than catalog entries, extras use `ENTITY_PREFIX` 
 For each data point at time `dt`:
 1. Start with entity baseline ranges (dcount_hosts, events_count)
 2. Apply `scale_factor` (per-entity uniqueness)
-3. If not flat: apply `DAY_MULTIPLIERS` (Mon=1.0 → Sun=0.6)
-4. Apply variation based on `get_effective_behavior()` (±VARIATION_PCT%)
-5. If not flat: apply `hourly_multiplier()` (sine or Gaussian curve)
-6. Ensure lo ≤ hi and positive values
-7. Return random values in adjusted ranges
+3. If a qualification entity: apply its current A/B regime and select its
+   stable pair-and-timestamp RNG
+4. If not flat: apply `DAY_MULTIPLIERS` (Mon=1.0 → Sun=0.6)
+5. Apply variation based on `get_effective_behavior()` (±VARIATION_PCT%)
+6. If not flat: apply `hourly_multiplier()` (sine or Gaussian curve)
+7. Ensure lo ≤ hi and positive values
+8. Return random values in adjusted ranges
+
+### Incremental A/B Qualification
+
+`QUALIFICATION_PROFILE=incremental_ab` adds two entities that differ only by
+`ref` and `qualification_trackme_mode`. A SHA-256-derived random seed combines
+the configured seed, pair ID, and timestamp. This guarantees exact metric
+equality across the pair and isolates model training mode as the experimental
+variable.
+
+`qualification_phase_at()` implements the live timeline:
+
+1. `bootstrap`: historical regime A before the live start
+2. `warmup`: live regime A
+3. `new_regime`: regime B for longer than the declared TrackMe window
+4. `return_regime`: regime A returns for comparison
+5. `complete`: regime A continues after the measurement period
+
+The timeline initializes only after backfill finishes. An explicit
+`QUALIFICATION_START_TIME` is normalized to UTC and supports continuity across
+container recreation when paired with a fixed `INSTANCE_ID`.
+`log_qualification_checkpoints()` deduplicates transitions by pair.
 
 ### Seasonality
 
@@ -256,6 +289,16 @@ All settings via environment variables (`.env` file):
 | `INSTANCE_ID` | *(empty)* | Fixed instance ID; if empty, UUID auto-generated |
 | `DISABLE_ALL_ANOMALIES` | `0` | `1` = force all entities to normal behavior |
 | `KEEP_ANOMALIES_ENTITIES` | *(empty)* | Comma-separated refs that keep anomalies even when `DISABLE_ALL_ANOMALIES=1` |
+| `QUALIFICATION_PROFILE` | `incremental_ab` | Paired scenario; set to `off` to omit only its two entities |
+| `QUALIFICATION_SEED` | `42` | Stable pair sample seed |
+| `QUALIFICATION_WINDOW_MINUTES` | `30` | TrackMe calculation window represented by the scenario |
+| `QUALIFICATION_WARMUP_MINUTES` | `10` | Live regime A warmup |
+| `QUALIFICATION_NEW_REGIME_MINUTES` | `40` | Regime B duration; must exceed the window |
+| `QUALIFICATION_RETURN_MINUTES` | `15` | Regime A comparison duration |
+| `QUALIFICATION_REGIME_A_PCT` | `100` | Original regime level |
+| `QUALIFICATION_REGIME_B_PCT` | `140` | New regime level |
+| `QUALIFICATION_NOISE_PCT` | `2` | Pair noise range, 0–25 |
+| `QUALIFICATION_START_TIME` | *(empty)* | Optional ISO-8601 live timeline start |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `DRY_RUN` | `false` | Generate events without sending to HEC |
 
@@ -283,6 +326,11 @@ TrackMe ML Outlier Detection documentation that references this generator:
 
 ### Deterministic RNG
 Backfill uses `Random(42)` for reproducibility. Entity profile building also uses `Random(42)`. Continuous generation uses an unseeded `Random()` for natural variation.
+
+Qualification entities are the exception: each timestamp uses a SHA-256-derived
+seed shared by both roles. Do not replace this with Python's built-in `hash()`,
+which is randomized per process, or consume the continuous global RNG, which
+would make the pair order-dependent.
 
 ### Short-Cycle Entity Isolation
 Short-cycle entities are removed from the seasonal catalog pool before random shuffling, preventing them from being double-assigned. If you add a new short-cycle entity, its ref must exist in `ENTITY_CATALOG`.
