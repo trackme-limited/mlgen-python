@@ -43,11 +43,11 @@ Container starts
       1. load_config() — reads all env vars
       2. instance_id — from INSTANCE_ID env or generate UUID
       3. build_entity_profiles() — creates entity list from catalogs
-      4. validate_config() — validates the optional qualification timeline
+      4. validate_config() — validates the default-on qualification timeline
       5. DISABLE_ALL_ANOMALIES check — overrides all behaviors to normal if set
       6. run_backfill() — generates BACKFILL_DAYS of historical data (all normal)
          ↳ SKIPPED if INSTANCE_ID is set (data already exists in Splunk)
-      7. initialize_qualification_timeline() — starts opt-in live A/B phases
+      7. initialize_qualification_timeline() — starts default-on live A/B phases
       8. run_continuous() — infinite loop generating real-time data with anomaly cycling
 ```
 
@@ -101,7 +101,7 @@ Three entity sources, defined as module-level constants:
 
 4. **`BEHAVIOR_CHANGE_CATALOG`** (1 entry) — Entities with progressive ramp-up then baseline shift. Each entry defines `ramp_start_pct` (starting volume %), `change_days` (how many recent days are at the elevated level), and `shift_pct` (elevated volume %). Used for ML model retraining demos.
 
-5. **`QUALIFICATION_PAIR_CATALOG`** (1 pair) — Opt-in flat entities with a
+5. **`QUALIFICATION_PAIR_CATALOG`** (1 pair) — Default-on flat entities with a
 shared baseline and deterministic samples for isolating TrackMe full versus
 incremental training behavior.
 
@@ -112,7 +112,7 @@ Order of entity creation:
 2. **Seasonal entities** — picked from remaining `ENTITY_CATALOG` (shuffled with seed 42), split across normal/lower/upper by `NUM_*` counts
 3. **Flat entities** — picked from `FLAT_ENTITY_CATALOG` (shuffled with seed 42), split across normal/lower by `NUM_FLAT_*` counts
 4. **Behavior-change entities** — picked from `BEHAVIOR_CHANGE_CATALOG`
-5. **Qualification pair** — appended only for `QUALIFICATION_PROFILE=incremental_ab`
+5. **Qualification pair** — appended by default; omitted only for `QUALIFICATION_PROFILE=off`
 
 If more entities are requested than catalog entries, extras use `ENTITY_PREFIX` fallback naming.
 
@@ -289,7 +289,7 @@ All settings via environment variables (`.env` file):
 | `INSTANCE_ID` | *(empty)* | Fixed instance ID; if empty, UUID auto-generated |
 | `DISABLE_ALL_ANOMALIES` | `0` | `1` = force all entities to normal behavior |
 | `KEEP_ANOMALIES_ENTITIES` | *(empty)* | Comma-separated refs that keep anomalies even when `DISABLE_ALL_ANOMALIES=1` |
-| `QUALIFICATION_PROFILE` | *(empty)* | `incremental_ab` enables the deterministic paired scenario |
+| `QUALIFICATION_PROFILE` | `incremental_ab` | Paired scenario; set to `off` to omit only its two entities |
 | `QUALIFICATION_SEED` | `42` | Stable pair sample seed |
 | `QUALIFICATION_WINDOW_MINUTES` | `30` | TrackMe calculation window represented by the scenario |
 | `QUALIFICATION_WARMUP_MINUTES` | `10` | Live regime A warmup |

@@ -14,7 +14,7 @@ ML Gen generates synthetic time-series data for testing and qualifying TrackMe's
 - **Short-cycle entities**: three entities with short daily anomaly/recovery cycles for live demos
 - **Flat entities**: IT ops / metrics collection entities with no seasonality for `time_factor=none` demos
 - **Behavior-change entities**: progressive data onboarding ramp-up followed by a baseline shift — demonstrates ML model retraining / adaptation
-- **Incremental A/B qualification**: opt-in, deterministic paired entities demonstrate what a full model forgets and an incremental model retains
+- **Incremental A/B qualification**: default-on, deterministic paired entities demonstrate what a full model forgets and an incremental model retains without altering other entities
 - **Instance tracking**: each container run gets a unique `instance_id` (auto-generated or fixed via config) — restart the container to get a fresh instance for TrackMe
 - **Backfill support**: populate historical data (default: 90 days) for ML model training, then automatically transitions to continuous generation
 - **HEC resilience**: retry with exponential backoff on HEC failures — the generator survives transient outages without crashing
@@ -150,7 +150,7 @@ In addition to the above, 3 short-cycle entities are always included (see [Short
 
 | Variable | Default | Description |
 |---|---|---|
-| `QUALIFICATION_PROFILE` | *(empty)* | Set to `incremental_ab` to add the paired recurring-regime scenario; empty or `off` leaves existing generation unchanged |
+| `QUALIFICATION_PROFILE` | `incremental_ab` | Generates the paired recurring-regime scenario by default; set to `off` to suppress only the two qualification entities |
 | `QUALIFICATION_SEED` | `42` | Stable seed shared by the pair |
 | `QUALIFICATION_WINDOW_MINUTES` | `30` | TrackMe calculation-window length used to validate the scenario timing |
 | `QUALIFICATION_WARMUP_MINUTES` | `10` | Regime A live warmup after historical bootstrap |
@@ -238,7 +238,9 @@ Drawn from the `BEHAVIOR_CHANGE_CATALOG` (default entity: `cloud:gcp:pubsub:audi
 
 ### Full versus Incremental Qualification
 
-Set `QUALIFICATION_PROFILE=incremental_ab` to add this controlled pair:
+The `incremental_ab` profile is enabled by default and adds this controlled
+pair. Set `QUALIFICATION_PROFILE=off` to suppress the pair without changing any
+other entity:
 
 | Entity ref | TrackMe model setting |
 |---|---|

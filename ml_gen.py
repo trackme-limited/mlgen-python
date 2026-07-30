@@ -100,8 +100,11 @@ def load_config() -> dict:
             for ref in os.environ.get("KEEP_ANOMALIES_ENTITIES", "").split(",")
             if ref.strip()
         ],
-        # Full-versus-incremental paired qualification scenario
-        "qualification_profile": os.environ.get("QUALIFICATION_PROFILE", "").strip().lower(),
+        # Full-versus-incremental paired qualification scenario (default-on)
+        "qualification_profile": (
+            os.environ.get("QUALIFICATION_PROFILE", "incremental_ab").strip().lower()
+            or "incremental_ab"
+        ),
         "qualification_seed": int(os.environ.get("QUALIFICATION_SEED", "42")),
         "qualification_window_minutes": int(
             os.environ.get("QUALIFICATION_WINDOW_MINUTES", "30")
@@ -309,7 +312,7 @@ BEHAVIOR_CHANGE_CATALOG = [
     },
 ]
 
-# Opt-in qualification pair. Both entities deliberately share a baseline and
+# Default-on qualification pair. Both entities deliberately share a baseline and
 # deterministic sample stream. Their only intended difference is the training
 # mode selected for their TrackMe models.
 QUALIFICATION_PAIR_CATALOG = [

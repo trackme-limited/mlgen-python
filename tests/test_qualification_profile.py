@@ -27,11 +27,27 @@ class QualificationProfileTests(unittest.TestCase):
         self.assertEqual(2, len(pair))
         return config, pair
 
-    def test_profile_is_opt_in(self):
+    def test_profile_is_enabled_by_default(self):
         with patch.dict(os.environ, {"DRY_RUN": "true"}, clear=True):
             config = ml_gen.load_config()
         ml_gen.validate_config(config)
         profiles = ml_gen.build_entity_profiles(config, random.Random(42))
+        qualification_profiles = [
+            profile for profile in profiles if profile.qualification
+        ]
+        self.assertEqual("incremental_ab", config["qualification_profile"])
+        self.assertEqual(2, len(qualification_profiles))
+
+    def test_profile_can_be_disabled_explicitly(self):
+        with patch.dict(
+            os.environ,
+            {"DRY_RUN": "true", "QUALIFICATION_PROFILE": "off"},
+            clear=True,
+        ):
+            config = ml_gen.load_config()
+        ml_gen.validate_config(config)
+        profiles = ml_gen.build_entity_profiles(config, random.Random(42))
+        self.assertEqual("", config["qualification_profile"])
         self.assertFalse(any(profile.qualification for profile in profiles))
 
     def test_pair_has_expected_roles_and_shared_shape(self):
