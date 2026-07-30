@@ -101,9 +101,9 @@ Three entity sources, defined as module-level constants:
 
 4. **`BEHAVIOR_CHANGE_CATALOG`** (1 entry) — Entities with progressive ramp-up then baseline shift. Each entry defines `ramp_start_pct` (starting volume %), `change_days` (how many recent days are at the elevated level), and `shift_pct` (elevated volume %). Used for ML model retraining demos.
 
-5. **`QUALIFICATION_PAIR_CATALOG`** (1 pair) — Default-on flat entities with a
-shared baseline and deterministic samples for isolating TrackMe full versus
-incremental training behavior.
+5. **`QUALIFICATION_PAIR_CATALOG`** (1 pair) — Default-on daily-seasonal
+entities with a shared baseline and deterministic samples for isolating
+TrackMe full versus incremental training behavior.
 
 ### Entity Profile Building (`build_entity_profiles()`)
 
@@ -123,7 +123,8 @@ For each data point at time `dt`:
 2. Apply `scale_factor` (per-entity uniqueness)
 3. If a qualification entity: apply its current A/B regime and select its
    stable pair-and-timestamp RNG
-4. If not flat: apply `DAY_MULTIPLIERS` (Mon=1.0 → Sun=0.6)
+4. If not flat: apply `DAY_MULTIPLIERS` (Mon=1.0 → Sun=0.6), except that
+   qualification entities deliberately omit weekday variation
 5. Apply variation based on `get_effective_behavior()` (±VARIATION_PCT%)
 6. If not flat: apply `hourly_multiplier()` (sine or Gaussian curve)
 7. Ensure lo ≤ hi and positive values
@@ -135,14 +136,17 @@ For each data point at time `dt`:
 `ref` and `qualification_trackme_mode`. A SHA-256-derived random seed combines
 the configured seed, pair ID, and timestamp. This guarantees exact metric
 equality across the pair and isolates model training mode as the experimental
-variable.
+variable. Both profiles use the same daily hour-of-day curve and declare
+`qualification_seasonality=daily_hour`; configure their TrackMe models with
+`time_factor=%H`, `kpi_span=1m`, and `period_calculation=-24h`.
 
 `qualification_phase_at()` implements the live timeline:
 
 1. `bootstrap`: historical regime A before the live start
 2. `warmup`: live regime A
-3. `new_regime`: regime B for longer than the declared TrackMe window
-4. `return_regime`: regime A returns for comparison
+3. `new_regime`: regime B for 25 hours, outliving the 24-hour TrackMe window
+   and covering every hourly group
+4. `return_regime`: regime A returns for a 3-hour comparison
 5. `complete`: regime A continues after the measurement period
 
 The timeline initializes only after backfill finishes. An explicit
@@ -291,10 +295,10 @@ All settings via environment variables (`.env` file):
 | `KEEP_ANOMALIES_ENTITIES` | *(empty)* | Comma-separated refs that keep anomalies even when `DISABLE_ALL_ANOMALIES=1` |
 | `QUALIFICATION_PROFILE` | `incremental_ab` | Paired scenario; set to `off` to omit only its two entities |
 | `QUALIFICATION_SEED` | `42` | Stable pair sample seed |
-| `QUALIFICATION_WINDOW_MINUTES` | `30` | TrackMe calculation window represented by the scenario |
+| `QUALIFICATION_WINDOW_MINUTES` | `1440` | 24-hour TrackMe calculation window represented by the scenario |
 | `QUALIFICATION_WARMUP_MINUTES` | `10` | Live regime A warmup |
-| `QUALIFICATION_NEW_REGIME_MINUTES` | `40` | Regime B duration; must exceed the window |
-| `QUALIFICATION_RETURN_MINUTES` | `15` | Regime A comparison duration |
+| `QUALIFICATION_NEW_REGIME_MINUTES` | `1500` | 25-hour regime B duration; must exceed the window |
+| `QUALIFICATION_RETURN_MINUTES` | `180` | 3-hour regime A comparison duration |
 | `QUALIFICATION_REGIME_A_PCT` | `100` | Original regime level |
 | `QUALIFICATION_REGIME_B_PCT` | `140` | New regime level |
 | `QUALIFICATION_NOISE_PCT` | `2` | Pair noise range, 0–25 |
@@ -316,6 +320,8 @@ The generated data is consumed in TrackMe via a Flex Objects tracker with:
 
 - Seasonal entities: use default `time_factor` (day-of-week + hour-of-day)
 - Flat entities: set `time_factor=none` in TrackMe since they have no seasonality
+- Qualification entities: use `time_factor=%H`; they intentionally model daily
+  hour-of-day seasonality without weekday variation
 
 ### Documentation Reference
 

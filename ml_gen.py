@@ -107,16 +107,16 @@ def load_config() -> dict:
         ),
         "qualification_seed": int(os.environ.get("QUALIFICATION_SEED", "42")),
         "qualification_window_minutes": int(
-            os.environ.get("QUALIFICATION_WINDOW_MINUTES", "30")
+            os.environ.get("QUALIFICATION_WINDOW_MINUTES", "1440")
         ),
         "qualification_warmup_minutes": int(
             os.environ.get("QUALIFICATION_WARMUP_MINUTES", "10")
         ),
         "qualification_new_regime_minutes": int(
-            os.environ.get("QUALIFICATION_NEW_REGIME_MINUTES", "40")
+            os.environ.get("QUALIFICATION_NEW_REGIME_MINUTES", "1500")
         ),
         "qualification_return_minutes": int(
-            os.environ.get("QUALIFICATION_RETURN_MINUTES", "15")
+            os.environ.get("QUALIFICATION_RETURN_MINUTES", "180")
         ),
         "qualification_regime_a_pct": int(
             os.environ.get("QUALIFICATION_REGIME_A_PCT", "100")
@@ -573,6 +573,7 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
             common = {
                 "profile": "incremental_ab",
                 "scenario": "recurring_regime",
+                "seasonality": "daily_hour",
                 "pair_id": pair["pair_id"],
                 "seed": config["qualification_seed"],
                 "window_minutes": config["qualification_window_minutes"],
@@ -595,7 +596,7 @@ def build_entity_profiles(config: dict, rng: random.Random) -> list[EntityProfil
                         behavior="normal",
                         baseline=dict(baseline),
                         scale_factor=1.0,
-                        flat=True,
+                        flat=False,
                         qualification=qualification,
                     )
                 )
@@ -771,6 +772,7 @@ def generate_metric(
         qualification_metadata = {
             "qualification_profile": entity.qualification["profile"],
             "qualification_scenario": entity.qualification["scenario"],
+            "qualification_seasonality": entity.qualification["seasonality"],
             "qualification_pair": entity.qualification["pair_id"],
             "qualification_trackme_mode": entity.qualification["role"],
             "qualification_phase": phase,
@@ -807,10 +809,16 @@ def generate_metric(
         events_lo = int(events_lo * bc_mult)
         events_hi = int(events_hi * bc_mult)
 
-    # Apply seasonality (skipped for flat entities like IT ops metrics)
+    # Apply seasonality (skipped for flat entities like IT ops metrics).
+    # Qualification entities use daily hour-of-day seasonality without a
+    # weekday multiplier, matching TrackMe time_factor=%H exactly.
     if not entity.flat:
         # Day-of-week seasonality
-        day_mult = DAY_MULTIPLIERS.get(weekday, 1.0)
+        day_mult = (
+            1.0
+            if entity.qualification is not None
+            else DAY_MULTIPLIERS.get(weekday, 1.0)
+        )
         dcount_lo = int(dcount_lo * day_mult)
         dcount_hi = int(dcount_hi * day_mult)
         events_lo = int(events_lo * day_mult)
@@ -1245,7 +1253,17 @@ def main():
     total_entities = len(entities)
     short_cycle_count = sum(1 for e in entities if e.short_cycle_hours is not None)
     bc_count = sum(1 for e in entities if e.behavior_change is not None)
-    seasonal_normal = sum(1 for e in entities if e.behavior == "normal" and not e.flat and e.short_cycle_hours is None and e.behavior_change is None)
+    seasonal_normal = sum(
+        1
+        for e in entities
+        if (
+            e.behavior == "normal"
+            and not e.flat
+            and e.short_cycle_hours is None
+            and e.behavior_change is None
+            and e.qualification is None
+        )
+    )
     seasonal_lower = sum(1 for e in entities if e.behavior == "lower_outlier" and not e.flat and e.short_cycle_hours is None)
     seasonal_upper = sum(1 for e in entities if e.behavior == "upper_outlier" and not e.flat and e.short_cycle_hours is None)
     flat_normal = sum(
@@ -1296,8 +1314,9 @@ def main():
     if qualification_entities:
         qualification = qualification_entities[0].qualification
         logger.info(
-            "    Recurring regime: A=%d%% for %dm warmup, B=%d%% for %dm, "
-            "A return for %dm (model window=%dm, seed=%d)",
+            "    Recurring regime (daily %%H seasonality): A=%d%% for %dm "
+            "warmup, B=%d%% for %dm, A return for %dm "
+            "(model window=%dm, seed=%d)",
             qualification["regime_a_pct"],
             qualification["warmup_minutes"],
             qualification["regime_b_pct"],
