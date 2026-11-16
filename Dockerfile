@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.15-slim
 
 LABEL maintainer="TrackMe Limited <support@trackme-solutions.com>"
 LABEL description="ML Gen — Synthetic metrics generator for TrackMe ML Outlier Detection testing"
